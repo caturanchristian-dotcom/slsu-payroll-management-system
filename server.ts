@@ -672,6 +672,22 @@ async function startServer() {
     return `${h}:${m} ${ampm}`;
   };
 
+  const autoRecalculatePayrollForEmployee = async (employeeId: string) => {
+    try {
+      const draftEntries = await db.prepare(`
+        SELECT DISTINCT cycleId 
+        FROM payroll_entries 
+        WHERE employeeId = ? 
+          AND cycleId IN (SELECT id FROM payroll_cycles WHERE status = 'draft')
+      `).all(employeeId) as { cycleId: string }[];
+      for (const entry of draftEntries) {
+        await recalculateCycle(entry.cycleId);
+      }
+    } catch (err) {
+      console.error("Auto-recalc payroll failed:", err);
+    }
+  };
+
   const recalculateCycle = async (cycleId: string) => {
     try {
       await db.transaction(async () => {
@@ -687,6 +703,7 @@ async function startServer() {
           const custom = entry.custom_values_json ? JSON.parse(entry.custom_values_json) : {};
           
           let computedBasicPay = Number(entry.basicPay);
+          let dynamicAbsences = 0.00;
 
           if (emp) {
             emp.basicSalary = Number(emp.basicSalary || 0);
@@ -901,13 +918,252 @@ async function startServer() {
               await db.prepare("UPDATE payroll_entries SET teachingHours = ? WHERE id = ?").run(tHours, entry.id);
               computedBasicPay = Number((tHours * emp.basicSalary).toFixed(2));
             } else {
-              // Regular Employee - Fixed monthly or semi-monthly rate
+              // Regular Employee - Salaries and Wages-2nd Tranche based on DTR
               let monthlyRate = emp.basicSalary;
-              if (cycle.type === 'semi-monthly') {
-                computedBasicPay = Number((monthlyRate / 2).toFixed(2));
-              } else {
-                computedBasicPay = Number(monthlyRate.toFixed(2));
+              let baseCyclePay = cycle.type === 'semi-monthly' ? (monthlyRate / 2) : monthlyRate;
+              
+              // Safe date format helper
+              const formatToYYYYMMDD = (dVal: any): string => {
+                if (!dVal) return '';
+                if (dVal instanceof Date) {
+                  const yr = dVal.getFullYear();
+                  const mo = String(dVal.getMonth() + 1).padStart(2, '0');
+                  const dy = String(dVal.getDate()).padStart(2, '0');
+                  return `${yr}-${mo}-${dy}`;
+                }
+                return String(dVal).split('T')[0];
+              };
+
+              const startDateStr = formatToYYYYMMDD(cycle.startDate);
+              const endDateStr = formatToYYYYMMDD(cycle.endDate);
+
+              // Fetch DTR logs and schedules for calculation
+              const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(emp.id) as any[];
+              const dtrLogs = await db.prepare("SELECT * FROM dtr_logs WHERE employeeId = ? AND date >= ? AND date <= ?").all(emp.id, startDateStr, endDateStr) as any[];
+              
+              const [sYr, sMn, sDy] = startDateStr.split('-').map(Number);
+              const [eYr, eMn, eDy] = endDateStr.split('-').map(Number);
+              const start = new Date(sYr, sMn - 1, sDy);
+              const end = new Date(eYr, eMn - 1, eDy);
+              let currentDate = new Date(start);
+              
+              const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+              let totalTardinessMinutes = 0;
+              let totalAbsenceDays = 0;
+              
+              const holidayRows = await db.prepare("SELECT date FROM holidays").all() as any[];
+              const holidayDates = new Set(holidayRows.map(h => h.date ? String(h.date).split('T')[0] : ''));
+
+              // Group dtrLogs by date YYYY-MM-DD
+              const logsByDate: { [dateStr: string]: any[] } = {};
+              for (const log of dtrLogs) {
+                if (log.date) {
+                  let logDateStr = '';
+                  if (log.date instanceof Date) {
+                    try { logDateStr = log.date.toISOString().split('T')[0]; } catch (e) {}
+                  } else {
+                    logDateStr = String(log.date).split('T')[0];
+                  }
+                  if (logDateStr) {
+                    if (!logsByDate[logDateStr]) {
+                      logsByDate[logDateStr] = [];
+                    }
+                    logsByDate[logDateStr].push(log);
+                  }
+                }
               }
+
+              while (currentDate <= end) {
+                const dateStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
+                
+                const dayOfWeek = currentDate.getDay();
+                const dayName = daysOfWeekStr[dayOfWeek];
+                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                const isHoliday = holidayDates.has(dateStr);
+
+                const daySchedules = schedules.filter(sch => {
+                  if (sch.specificDate) {
+                    return sch.specificDate.split('T')[0] === dateStr;
+                  }
+                  return sch.dayOfWeek === dayName;
+                });
+
+                const hasSchedule = daySchedules.length > 0;
+                // If they have no explicit schedules at all, default to Mon-Fri as regular work days
+                const isWorkDay = hasSchedule || (!isWeekend && schedules.length === 0);
+
+                // Skip holidays in deduction calculations (regular employees are paid during holidays)
+                if (isHoliday && (!hasSchedule || daySchedules.every(s => !s.specificDate))) {
+                  currentDate.setDate(currentDate.getDate() + 1);
+                  continue;
+                }
+
+                if (isWorkDay) {
+                  let amStartTimeStr = '08:00';
+                  let amEndTimeStr = '12:00';
+                  let pmStartTimeStr = '13:00';
+                  let pmEndTimeStr = '17:00';
+
+                  if (hasSchedule) {
+                    const sortedSchedules = [...daySchedules].sort((a, b) => a.startTime.localeCompare(b.startTime));
+                    let schedAm = null;
+                    let schedPm = null;
+                    if (sortedSchedules.length >= 2) {
+                      schedAm = sortedSchedules[0];
+                      schedPm = sortedSchedules[1];
+                    } else if (sortedSchedules.length === 1) {
+                      const firstSched = sortedSchedules[0];
+                      const firstStartHour = Number(firstSched.startTime.split(':')[0]);
+                      if (firstStartHour < 12) {
+                        schedAm = firstSched;
+                      } else {
+                        schedPm = firstSched;
+                      }
+                    }
+
+                    if (schedAm) {
+                      amStartTimeStr = schedAm.startTime;
+                      amEndTimeStr = schedAm.endTime;
+                    } else {
+                      amStartTimeStr = '00:00';
+                      amEndTimeStr = '00:00';
+                    }
+
+                    if (schedPm) {
+                      pmStartTimeStr = schedPm.startTime;
+                      pmEndTimeStr = schedPm.endTime;
+                    } else {
+                      pmStartTimeStr = '00:00';
+                      pmEndTimeStr = '00:00';
+                    }
+                  }
+
+                  const getMinutesFromTime = (timeStr: string) => {
+                    if (!timeStr || timeStr === '00:00') return 0;
+                    let [h, m] = timeStr.split(':').map(Number);
+                    if (h > 0 && h <= 6) h += 12;
+                    return h * 60 + (m || 0);
+                  };
+
+                  const amStartMinutes = getMinutesFromTime(amStartTimeStr);
+                  const amEndMinutes = getMinutesFromTime(amEndTimeStr);
+                  const pmStartMinutes = getMinutesFromTime(pmStartTimeStr);
+                  const pmEndMinutes = getMinutesFromTime(pmEndTimeStr);
+
+                  const expectedMinutes = (amStartTimeStr !== '00:00' ? (amEndMinutes - amStartMinutes) : 0) +
+                                          (pmStartTimeStr !== '00:00' ? (pmEndMinutes - pmStartMinutes) : 0);
+
+                  const dayLogs = logsByDate[dateStr] || [];
+
+                  if (dayLogs.length === 0) {
+                    // Full absence on a work day
+                    totalAbsenceDays += 1;
+                  } else {
+                    // Had punches, compute total worked overlap
+                    const sorted = [...dayLogs].sort((a, b) => {
+                      const aTime = a.timeIn ? new Date(a.timeIn).getTime() : 0;
+                      const bTime = b.timeIn ? new Date(b.timeIn).getTime() : 0;
+                      return aTime - bTime;
+                    });
+
+                    let amInDate: Date | null = null;
+                    let amOutDate: Date | null = null;
+                    let pmInDate: Date | null = null;
+                    let pmOutDate: Date | null = null;
+
+                    if (sorted.length >= 2) {
+                      amInDate = sorted[0].timeIn ? new Date(sorted[0].timeIn) : null;
+                      amOutDate = sorted[0].timeOut ? new Date(sorted[0].timeOut) : null;
+                      pmInDate = sorted[1].timeIn ? new Date(sorted[1].timeIn) : null;
+                      pmOutDate = sorted[1].timeOut ? new Date(sorted[1].timeOut) : null;
+                    } else if (sorted.length === 1) {
+                      const singleLog = sorted[0];
+                      const inDate = singleLog.timeIn ? new Date(singleLog.timeIn) : null;
+                      let isAmShift = true;
+                      if (inDate) {
+                        const hour = inDate.getHours();
+                        if (hasSchedule) {
+                          if (amStartTimeStr !== '00:00' && pmStartTimeStr === '00:00') {
+                            isAmShift = true;
+                          } else if (pmStartTimeStr !== '00:00' && amStartTimeStr === '00:00') {
+                            isAmShift = false;
+                          } else {
+                            const amStartMin = getMinutesFromTime(amStartTimeStr);
+                            const pmStartMin = getMinutesFromTime(pmStartTimeStr);
+                            const logMin = hour * 60 + inDate.getMinutes();
+                            isAmShift = Math.abs(logMin - amStartMin) < Math.abs(logMin - pmStartMin);
+                          }
+                        } else {
+                          isAmShift = hour < 12;
+                        }
+                      }
+
+                      if (isAmShift) {
+                        amInDate = inDate;
+                        amOutDate = singleLog.timeOut ? new Date(singleLog.timeOut) : null;
+                      } else {
+                        pmInDate = inDate;
+                        pmOutDate = singleLog.timeOut ? new Date(singleLog.timeOut) : null;
+                      }
+                    }
+
+                    let totalWorkedMinutes = 0;
+                    const amStart = amStartTimeStr !== '00:00' ? amStartMinutes : 480;
+                    const amEnd = amEndTimeStr !== '00:00' ? amEndMinutes : 720;
+                    const pmStart = pmStartTimeStr !== '00:00' ? pmStartMinutes : 780;
+                    const pmEnd = pmEndTimeStr !== '00:00' ? pmEndMinutes : 1020;
+
+                    if (amInDate && amOutDate) {
+                      const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
+                      const departureMin = amOutDate.getHours() * 60 + amOutDate.getMinutes();
+                      const effectiveIn = Math.max(arrivalMin, amStart);
+                      const effectiveOut = Math.min(departureMin, amEnd);
+                      if (effectiveOut > effectiveIn) {
+                        totalWorkedMinutes += (effectiveOut - effectiveIn);
+                      }
+                    }
+
+                    if (pmInDate && pmOutDate) {
+                      const arrivalMin = pmInDate.getHours() * 60 + pmInDate.getMinutes();
+                      const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
+                      const effectiveIn = Math.max(arrivalMin, pmStart);
+                      const effectiveOut = Math.min(departureMin, pmEnd);
+                      if (effectiveOut > effectiveIn) {
+                        totalWorkedMinutes += (effectiveOut - effectiveIn);
+                      }
+                    }
+
+                    if (amInDate && pmOutDate && !amOutDate && !pmInDate) {
+                      const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
+                      const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
+                      let totalSpan = departureMin - arrivalMin;
+                      let worked = totalSpan - 60; // noon break (1 hour default)
+                      const activeSchedDuration = (amEnd - amStart) + (pmEnd - pmStart);
+                      worked = Math.min(worked, activeSchedDuration);
+                      if (worked > 0) {
+                        totalWorkedMinutes = worked;
+                      }
+                    }
+
+                    const targetExp = expectedMinutes || 480;
+                    if (totalWorkedMinutes < targetExp) {
+                      totalTardinessMinutes += (targetExp - totalWorkedMinutes);
+                    }
+                  }
+                }
+                currentDate.setDate(currentDate.getDate() + 1);
+              }
+
+              // Hourly and minute rate derivation based on standard 22 working days monthly
+              const hourlyRate = monthlyRate / (22 * 8);
+              const minuteRate = hourlyRate / 60;
+              const undertimeDeduction = totalTardinessMinutes * minuteRate;
+
+              computedBasicPay = Math.max(0, Number((baseCyclePay - undertimeDeduction).toFixed(2)));
+
+              // 22 working days in a month for daily rate equivalence
+              const dailyRate = monthlyRate / 22;
+              dynamicAbsences = Number((totalAbsenceDays * dailyRate).toFixed(2));
             }
           }
 
@@ -922,8 +1178,8 @@ async function startServer() {
           // PERA (default is PHP 2,000.00)
           const compPera = custom.compPera !== undefined ? Number(custom.compPera) : 2000.00;
 
-          // Absences deduction (default is 0.00)
-          const absences = custom.absences !== undefined ? Number(custom.absences) : 0.00;
+          // Absences deduction (default uses dynamic DTR computed value)
+          const absences = custom.absences !== undefined ? Number(custom.absences) : dynamicAbsences;
 
           // Calculate overtime
           let computedOvertime = Number(entry.overtime || 0);
@@ -1643,6 +1899,7 @@ async function startServer() {
       INSERT INTO schedules (id, employeeId, dayOfWeek, startTime, endTime, subject, room, specificDate, effectiveFrom, effectiveTo) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, employeeId, dayOfWeek, startTime, endTime, subject, room, specificDate || null, effectiveFrom || null, effectiveTo || null);
+    await autoRecalculatePayrollForEmployee(employeeId);
     res.json({ id, success: true });
   }));
 
@@ -1654,11 +1911,16 @@ async function startServer() {
       SET employeeId = ?, dayOfWeek = ?, startTime = ?, endTime = ?, subject = ?, room = ?, specificDate = ?, effectiveFrom = ?, effectiveTo = ?
       WHERE id = ?
     `).run(employeeId, dayOfWeek, startTime, endTime, subject, room, specificDate || null, effectiveFrom || null, effectiveTo || null, id);
+    await autoRecalculatePayrollForEmployee(employeeId);
     res.json({ success: true });
   }));
 
   app.delete("/api/schedules/:id", asyncHandler(async (req: any, res: any) => {
-    await db.prepare("DELETE FROM schedules WHERE id = ?").run(req.params.id);
+    const sch = await db.prepare("SELECT employeeId FROM schedules WHERE id = ?").get(req.params.id) as any;
+    if (sch) {
+      await db.prepare("DELETE FROM schedules WHERE id = ?").run(req.params.id);
+      await autoRecalculatePayrollForEmployee(sch.employeeId);
+    }
     res.json({ success: true });
   }));
 
@@ -1964,6 +2226,7 @@ async function startServer() {
       await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
         id, employeeId, date, fullTimeIn, fullTimeOut, notes || ''
       );
+      await autoRecalculatePayrollForEmployee(employeeId);
       res.json({ id, success: true });
     } catch (error: any) {
       console.error("Manual DTR Log Error:", error);
@@ -1972,13 +2235,18 @@ async function startServer() {
   }));
 
   app.delete("/api/dtr/:id", asyncHandler(async (req: any, res: any) => {
-    await db.prepare("DELETE FROM dtr_logs WHERE id = ?").run(req.params.id);
+    const log = await db.prepare("SELECT employeeId FROM dtr_logs WHERE id = ?").get(req.params.id) as any;
+    if (log) {
+      await db.prepare("DELETE FROM dtr_logs WHERE id = ?").run(req.params.id);
+      await autoRecalculatePayrollForEmployee(log.employeeId);
+    }
     res.json({ success: true });
   }));
 
   app.delete("/api/dtr/clear/:employeeId/:yearMonth", asyncHandler(async (req: any, res: any) => {
     const { employeeId, yearMonth } = req.params;
     await db.prepare("DELETE FROM dtr_logs WHERE employeeId = ? AND date LIKE ?").run(employeeId, `${yearMonth}%`);
+    await autoRecalculatePayrollForEmployee(employeeId);
     res.json({ success: true });
   }));
   // Users
@@ -2249,6 +2517,7 @@ async function startServer() {
 
     const id = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
     await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, notes) VALUES (?, ?, ?, ?, ?)").run(id, employeeId, today, now, notes || '');
+    await autoRecalculatePayrollForEmployee(employeeId);
     
     // Send simulated SMS
     try {
@@ -2269,6 +2538,7 @@ async function startServer() {
     if (!log) return res.status(404).json({ error: "No active clock-in found for today" });
 
     await db.prepare("UPDATE dtr_logs SET timeOut = ? WHERE id = ?").run(now, log.id);
+    await autoRecalculatePayrollForEmployee(employeeId);
     await logAudit(req, 'DTR_CLOCK_OUT', `Employee ID: ${employeeId} clocked out successfully.`);
 
     // Send simulated SMS
