@@ -25,7 +25,8 @@ import {
   Trash2,
   UserPlus,
   FileSpreadsheet,
-  Upload
+  Upload,
+  Loader2
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
@@ -120,7 +121,17 @@ const Payroll = () => {
   const [selectedCycle, setSelectedCycle] = useState<any>(null);
   const [entries, setEntries] = useState<any[]>([]);
 
+  // Operational loaders
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isDisbursing, setIsDisbursing] = useState(false);
+  const [isReverting, setIsReverting] = useState(false);
+  const [isApproving, setIsApproving] = useState(false);
+  const [isRejecting, setIsRejecting] = useState(false);
+  const [isCreatingCycle, setIsCreatingCycle] = useState(false);
+  const [isAddingEmployee, setIsAddingEmployee] = useState<string | null>(null);
+
   const handleApproveBatch = async (cycleId: string) => {
+    setIsApproving(true);
     try {
       await api.payroll.approve(cycleId);
       toast.success('Payroll batch list approved successfully!');
@@ -130,10 +141,13 @@ const Payroll = () => {
       }
     } catch (e: any) {
       toast.error('Approval failed: ' + e.message);
+    } finally {
+      setIsApproving(false);
     }
   };
 
   const handleRejectBatch = async (cycleId: string) => {
+    setIsRejecting(true);
     try {
       await api.payroll.reject(cycleId);
       toast.success('Payroll batch list rejected!');
@@ -143,6 +157,8 @@ const Payroll = () => {
       }
     } catch (e: any) {
       toast.error('Rejection failed: ' + e.message);
+    } finally {
+      setIsRejecting(false);
     }
   };
 
@@ -179,6 +195,10 @@ const Payroll = () => {
   const [availableEmployees, setAvailableEmployees] = useState<any[]>([]);
   const [allEmployeesList, setAllEmployeesList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(false);
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
+  const [isExportingSlips, setIsExportingSlips] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [itemToDelete, setItemToDelete] = useState<{ id: string, type: 'cycle' | 'entry' } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -358,6 +378,7 @@ const Payroll = () => {
   }, [selectedCycle?.id]);
 
   const fetchEntries = async () => {
+    setEntriesLoading(true);
     try {
       const data = await api.payroll.getEntries(selectedCycle.id);
       setEntries(data);
@@ -377,6 +398,8 @@ const Payroll = () => {
       }
     } catch (error: any) {
       toast.error('Failed to fetch entries');
+    } finally {
+      setEntriesLoading(false);
     }
   };
 
@@ -394,6 +417,7 @@ const Payroll = () => {
   };
 
   const handleAddEmployee = async (employeeId: string) => {
+    setIsAddingEmployee(employeeId);
     try {
       await api.payroll.addEmployee(selectedCycle.id, employeeId);
       toast.success('Employee added to cycle');
@@ -401,6 +425,8 @@ const Payroll = () => {
       fetchAvailableEmployees();
     } catch (error: any) {
       toast.error(error.message);
+    } finally {
+      setIsAddingEmployee(null);
     }
   };
 
@@ -437,6 +463,7 @@ const Payroll = () => {
 
   const handleCreateCycle = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsCreatingCycle(true);
     try {
       await api.payroll.createCycle(newCycle);
       toast.success('Payroll cycle created and entries generated');
@@ -444,10 +471,13 @@ const Payroll = () => {
       fetchCycles();
     } catch (error: any) {
       toast.error(error.message);
+    } finally {
+      setIsCreatingCycle(false);
     }
   };
 
   const handleProcessPayroll = async (cycle: any) => {
+    setIsProcessing(true);
     try {
       toast.info('Payroll processing started...');
       await api.payroll.process(cycle.id);
@@ -459,6 +489,8 @@ const Payroll = () => {
       setSelectedCycle(updated);
     } catch (error: any) {
       toast.error(error.message);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -737,7 +769,7 @@ const Payroll = () => {
               matchedEmployeeId = matchedEmp.id;
               matchedEntryId = `new-emp-${matchedEmp.id}`;
               employeeName = `${matchedEmp.lastName}, ${matchedEmp.firstName}`;
-              friendlyEmployeeId = matchedEmp.employeeId || matchedEmp.bpno || null;
+              friendlyEmployeeId = matchedEmp.employeeNo || matchedEmp.employeeId || matchedEmp.bpno || null;
             }
           }
 
@@ -1054,86 +1086,96 @@ const Payroll = () => {
       return;
     }
 
-    const doc = new jsPDF();
-    
-    entries.forEach((entry, index) => {
-      if (index > 0) doc.addPage();
-      
-      // Header
-      doc.setFontSize(24);
-      doc.setFont('helvetica', 'bold');
-      doc.text('SLSU PAYROLL SYSTEM', 105, 25, { align: 'center' });
-      doc.setFontSize(14);
-      doc.setFont('helvetica', 'normal');
-      doc.text('OFFICIAL PAYSLIP', 105, 35, { align: 'center' });
-      
-      // Employee Info
-      doc.setFontSize(11);
-      doc.text(`Employee Name: ${entry.employeeName}`, 20, 55);
-      doc.text(`Employee ID: ${entry.friendlyEmployeeId || entry.employeeId}`, 20, 62);
-      doc.text(`Payroll Period: ${selectedCycle.name}`, 20, 69);
-      doc.text(`Date Generated: ${format(new Date(), 'MMM dd, yyyy')}`, 20, 76);
-      
-      // Earnings Table
-      autoTable(doc, {
-        startY: 90,
-        head: [['EARNINGS', 'AMOUNT']],
-        body: [
-          ['Basic Pay', `PHP ${formatCurrency(entry.basicPay)}`],
-          ['Overtime', `PHP ${formatCurrency(entry.overtime)}`],
-          ['Bonuses', `PHP ${formatCurrency(entry.bonuses)}`],
-          [{ content: 'GROSS PAY', styles: { fontStyle: 'bold' } }, { content: `PHP ${formatCurrency(entry.grossPay)}`, styles: { fontStyle: 'bold' } }],
-        ],
-        theme: 'striped',
-        headStyles: { 
-          fillColor: [24, 24, 27], // neutral-900
-          textColor: [255, 255, 255],
-          fontSize: 10,
-          fontStyle: 'bold'
-        },
-        bodyStyles: { fontSize: 10 },
-        alternateRowStyles: { fillColor: [250, 250, 250] }
-      });
+    setIsExportingSlips(true);
+    setTimeout(() => {
+      try {
+        const doc = new jsPDF();
+        
+        entries.forEach((entry, index) => {
+          if (index > 0) doc.addPage();
+          
+          // Header
+          doc.setFontSize(24);
+          doc.setFont('helvetica', 'bold');
+          doc.text('SLSU PAYROLL SYSTEM', 105, 25, { align: 'center' });
+          doc.setFontSize(14);
+          doc.setFont('helvetica', 'normal');
+          doc.text('OFFICIAL PAYSLIP', 105, 35, { align: 'center' });
+          
+          // Employee Info
+          doc.setFontSize(11);
+          doc.text(`Employee Name: ${entry.employeeName}`, 20, 55);
+          doc.text(`Employee ID: ${entry.friendlyEmployeeId || entry.employeeId}`, 20, 62);
+          doc.text(`Payroll Period: ${selectedCycle.name}`, 20, 69);
+          doc.text(`Date Generated: ${format(new Date(), 'MMM dd, yyyy')}`, 20, 76);
+          
+          // Earnings Table
+          autoTable(doc, {
+            startY: 90,
+            head: [['EARNINGS', 'AMOUNT']],
+            body: [
+              ['Basic Pay', `PHP ${formatCurrency(entry.basicPay)}`],
+              ['Overtime', `PHP ${formatCurrency(entry.overtime)}`],
+              ['Bonuses', `PHP ${formatCurrency(entry.bonuses)}`],
+              [{ content: 'GROSS PAY', styles: { fontStyle: 'bold' } }, { content: `PHP ${formatCurrency(entry.grossPay)}`, styles: { fontStyle: 'bold' } }],
+            ],
+            theme: 'striped',
+            headStyles: { 
+              fillColor: [24, 24, 27], // neutral-900
+              textColor: [255, 255, 255],
+              fontSize: 10,
+              fontStyle: 'bold'
+            },
+            bodyStyles: { fontSize: 10 },
+            alternateRowStyles: { fillColor: [250, 250, 250] }
+          });
 
-      // Deductions Table
-      const deductionRows = Object.entries(entry.deductions || {}).map(([name, amount]) => [
-        name, 
-        `PHP ${formatCurrency(amount as number)}`
-      ]);
+          // Deductions Table
+          const deductionRows = Object.entries(entry.deductions || {}).map(([name, amount]) => [
+            name, 
+            `PHP ${formatCurrency(amount as number)}`
+          ]);
 
-      autoTable(doc, {
-        startY: (doc as any).lastAutoTable.finalY + 15,
-        head: [['DEDUCTIONS', 'AMOUNT']],
-        body: [
-          ...deductionRows,
-          [{ content: 'TOTAL DEDUCTIONS', styles: { fontStyle: 'bold' } }, { content: `PHP ${formatCurrency(entry.totalDeductions)}`, styles: { fontStyle: 'bold' } }],
-        ],
-        theme: 'striped',
-        headStyles: { 
-          fillColor: [153, 0, 0], // Dark Red
-          textColor: [255, 255, 255],
-          fontSize: 10,
-          fontStyle: 'bold'
-        },
-        bodyStyles: { fontSize: 10 },
-        alternateRowStyles: { fillColor: [250, 250, 250] }
-      });
+          autoTable(doc, {
+            startY: (doc as any).lastAutoTable.finalY + 15,
+            head: [['DEDUCTIONS', 'AMOUNT']],
+            body: [
+              ...deductionRows,
+              [{ content: 'TOTAL DEDUCTIONS', styles: { fontStyle: 'bold' } }, { content: `PHP ${formatCurrency(entry.totalDeductions)}`, styles: { fontStyle: 'bold' } }],
+            ],
+            theme: 'striped',
+            headStyles: { 
+              fillColor: [153, 0, 0], // Dark Red
+              textColor: [255, 255, 255],
+              fontSize: 10,
+              fontStyle: 'bold'
+            },
+            bodyStyles: { fontSize: 10 },
+            alternateRowStyles: { fillColor: [250, 250, 250] }
+          });
 
-      // Net Pay
-      const finalY = (doc as any).lastAutoTable.finalY + 20;
-      doc.setFontSize(16);
-      doc.setFont('helvetica', 'bold');
-      doc.text(`NET PAY: PHP ${formatCurrency(entry.netPay)}`, 190, finalY, { align: 'right' });
-      
-      // Footer
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(100);
-      doc.text('This is a system-generated document.', 105, 285, { align: 'center' });
-    });
-    
-    doc.save(`All_Payslips_${selectedCycle.name}.pdf`);
-    toast.success('All payslips downloaded as PDF');
+          // Net Pay
+          const finalY = (doc as any).lastAutoTable.finalY + 20;
+          doc.setFontSize(16);
+          doc.setFont('helvetica', 'bold');
+          doc.text(`NET PAY: PHP ${formatCurrency(entry.netPay)}`, 190, finalY, { align: 'right' });
+          
+          // Footer
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(100);
+          doc.text('This is a system-generated document.', 105, 285, { align: 'center' });
+        });
+        
+        doc.save(`All_Payslips_${selectedCycle.name}.pdf`);
+        toast.success('All payslips downloaded as PDF');
+      } catch (error: any) {
+        console.error('All Slips Generation Error:', error);
+        toast.error('Failed to generate all payslips');
+      } finally {
+        setIsExportingSlips(false);
+      }
+    }, 50);
   };
 
   const downloadTablePDF = () => {
@@ -1142,97 +1184,102 @@ const Payroll = () => {
       return;
     }
 
-    try {
-      const doc = new jsPDF('l', 'mm', 'a4'); // Landscape
-      const pageWidth = doc.internal.pageSize.getWidth();
-      
-      // Basic Header
-      doc.setFillColor(30, 30, 30); 
-      doc.rect(0, 0, pageWidth, 35, 'F');
-      
-      doc.setTextColor(255, 255, 255);
-      doc.setFontSize(20);
-      doc.text('SLSU PAYROLL SYSTEM', 15, 15);
-      
-      doc.setFontSize(10);
-      doc.text(`PAYROLL REPORT: ${selectedCycle.name.toUpperCase()}`, 15, 25);
-      
-      doc.setFontSize(8);
-      doc.text(`PERIOD: ${format(new Date(selectedCycle.startDate), 'MMM dd')} - ${format(new Date(selectedCycle.endDate), 'MMM dd, yyyy')}`, 15, 30);
+    setIsExportingPDF(true);
+    setTimeout(() => {
+      try {
+        const doc = new jsPDF('l', 'mm', 'a4'); // Landscape
+        const pageWidth = doc.internal.pageSize.getWidth();
+        
+        // Basic Header
+        doc.setFillColor(30, 30, 30); 
+        doc.rect(0, 0, pageWidth, 35, 'F');
+        
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(20);
+        doc.text('SLSU PAYROLL SYSTEM', 15, 15);
+        
+        doc.setFontSize(10);
+        doc.text(`PAYROLL REPORT: ${selectedCycle.name.toUpperCase()}`, 15, 25);
+        
+        doc.setFontSize(8);
+        doc.text(`PERIOD: ${format(new Date(selectedCycle.startDate), 'MMM dd')} - ${format(new Date(selectedCycle.endDate), 'MMM dd, yyyy')}`, 15, 30);
 
-      // Get all unique deduction names
-      const allDeductionNames = Array.from(new Set(
-        entries.flatMap(e => Object.keys(e.deductions || {}))
-      )).sort();
+        // Get all unique deduction names
+        const allDeductionNames = Array.from(new Set(
+          entries.flatMap(e => Object.keys(e.deductions || {}))
+        )).sort();
 
-      const headers = [
-        'NAME', 
-        'ID', 
-        'BASIC', 
-        'OT/BONUS', 
-        'GROSS', 
-        ...allDeductionNames.map(d => d.toUpperCase()), 
-        'TOTAL DED', 
-        'NET PAY'
-      ];
-
-      const tableData = entries.map(e => {
-        const row = [
-          e.employeeName,
-          e.employeeId,
-          formatCurrency(e.basicPay),
-          `${formatCurrency(e.overtime)} / ${formatCurrency(e.bonuses)}`,
-          formatCurrency(e.grossPay)
+        const headers = [
+          'NAME', 
+          'ID', 
+          'BASIC', 
+          'OT/BONUS', 
+          'GROSS', 
+          ...allDeductionNames.map(d => d.toUpperCase()), 
+          'TOTAL DED', 
+          'NET PAY'
         ];
 
-        // Add individual deductions
-        allDeductionNames.forEach(name => {
-          row.push(formatCurrency(e.deductions?.[name] || 0));
+        const tableData = entries.map(e => {
+          const row = [
+            e.employeeName,
+            e.employeeId,
+            formatCurrency(e.basicPay),
+            `${formatCurrency(e.overtime)} / ${formatCurrency(e.bonuses)}`,
+            formatCurrency(e.grossPay)
+          ];
+
+          // Add individual deductions
+          allDeductionNames.forEach(name => {
+            row.push(formatCurrency(e.deductions?.[name] || 0));
+          });
+
+          row.push(formatCurrency(e.totalDeductions));
+          row.push(formatCurrency(e.netPay));
+          return row;
         });
 
-        row.push(formatCurrency(e.totalDeductions));
-        row.push(formatCurrency(e.netPay));
-        return row;
-      });
+        autoTable(doc, {
+          startY: 40,
+          head: [headers],
+          body: tableData,
+          theme: 'grid',
+          headStyles: { fillColor: [40, 40, 40], textColor: [255, 255, 255], fontSize: 7 },
+          styles: { fontSize: 6, cellPadding: 2 },
+          margin: { left: 10, right: 10 },
+          columnStyles: {
+            0: { cellWidth: 35 }, // Name
+            1: { cellWidth: 20 }, // ID
+          }
+        });
 
-      autoTable(doc, {
-        startY: 40,
-        head: [headers],
-        body: tableData,
-        theme: 'grid',
-        headStyles: { fillColor: [40, 40, 40], textColor: [255, 255, 255], fontSize: 7 },
-        styles: { fontSize: 6, cellPadding: 2 },
-        margin: { left: 10, right: 10 },
-        columnStyles: {
-          0: { cellWidth: 35 }, // Name
-          1: { cellWidth: 20 }, // ID
-        }
-      });
+        const finalY = (doc as any).lastAutoTable?.finalY || 150;
+        doc.setTextColor(0, 0, 0);
+        doc.setFontSize(12);
+        doc.text(`TOTAL NET DISBURSEMENT: PHP ${formatCurrency(selectedCycle.totalNet)}`, pageWidth - 15, finalY + 15, { align: 'right' });
 
-      const finalY = (doc as any).lastAutoTable?.finalY || 150;
-      doc.setTextColor(0, 0, 0);
-      doc.setFontSize(12);
-      doc.text(`TOTAL NET DISBURSEMENT: PHP ${formatCurrency(selectedCycle.totalNet)}`, pageWidth - 15, finalY + 15, { align: 'right' });
-
-      // Manual download to bypass potential doc.save() issues
-      const blob = doc.output('blob');
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `Payroll_Report_${selectedCycle.name.replace(/[^a-z0-9]/gi, '_')}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      
-      toast.success('Payroll report downloaded');
-    } catch (error) {
-      console.error('PDF Generation Error:', error);
-      toast.error('Failed to generate PDF');
-    }
+        // Manual download to bypass potential doc.save() issues
+        const blob = doc.output('blob');
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `Payroll_Report_${selectedCycle.name.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        toast.success('Payroll report downloaded');
+      } catch (error) {
+        console.error('PDF Generation Error:', error);
+        toast.error('Failed to generate PDF');
+      } finally {
+        setIsExportingPDF(false);
+      }
+    }, 50);
   };
 
-  const downloadAllExcel = () => {
+  const performExcelGeneration = () => {
     if (entries.length === 0) {
       toast.error('No entries to download');
       return;
@@ -1698,7 +1745,26 @@ const Payroll = () => {
     toast.success('Professional general payroll exported successfully');
   };
 
+  const downloadAllExcel = () => {
+    if (entries.length === 0) {
+      toast.error('No entries to download');
+      return;
+    }
+    setIsExportingExcel(true);
+    setTimeout(() => {
+      try {
+        performExcelGeneration();
+      } catch (error: any) {
+        console.error('Excel Generation Error:', error);
+        toast.error('Failed to export General Payroll Excel');
+      } finally {
+        setIsExportingExcel(false);
+      }
+    }, 50);
+  };
+
   const handleDisburse = async (cycle: any) => {
+    setIsDisbursing(true);
     try {
       await api.payroll.disburse(cycle.id);
       toast.success('Payroll disbursed successfully');
@@ -1708,10 +1774,13 @@ const Payroll = () => {
       }
     } catch (error: any) {
       toast.error(error.message);
+    } finally {
+      setIsDisbursing(false);
     }
   };
 
   const handleRevertToDraft = async (cycle: any) => {
+    setIsReverting(true);
     try {
       await api.payroll.revert(cycle.id);
       toast.success('Payroll reverted to draft');
@@ -1721,6 +1790,8 @@ const Payroll = () => {
       }
     } catch (error: any) {
       toast.error(error.message);
+    } finally {
+      setIsReverting(false);
     }
   };
 
@@ -1737,6 +1808,18 @@ const Payroll = () => {
   });
 
   const cn = (...inputs: any[]) => inputs.filter(Boolean).join(' ');
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] py-20 bg-white rounded-2xl border border-neutral-200/60 shadow-sm">
+        <Loader2 className="w-12 h-12 text-neutral-900 animate-spin mb-4" />
+        <h3 className="text-lg font-semibold text-neutral-900">Loading Payroll Cycles</h3>
+        <p className="text-sm text-neutral-500 max-w-xs text-center mt-1">
+          Please wait while we retrieve the latest payroll records and system calculations.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full">
@@ -1802,8 +1885,16 @@ const Payroll = () => {
                             <p className="font-bold text-sm">{emp.lastName}, {emp.firstName}</p>
                             <p className="text-xs text-neutral-500">{emp.employeeId} • {emp.category}</p>
                           </div>
-                          <Button size="sm" onClick={() => handleAddEmployee(emp.id)}>
-                            Add
+                          <Button 
+                            size="sm" 
+                            onClick={() => handleAddEmployee(emp.id)}
+                            disabled={isAddingEmployee === emp.id}
+                          >
+                            {isAddingEmployee === emp.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              "Add"
+                            )}
                           </Button>
                         </div>
                       ))
@@ -1813,9 +1904,17 @@ const Payroll = () => {
               </Dialog>
             )}
             {selectedCycle.status === 'draft' && (
-              <Button onClick={() => handleProcessPayroll(selectedCycle)} className="bg-neutral-900 text-white gap-2">
-                <Play className="w-4 h-4" />
-                Process Payroll
+              <Button 
+                onClick={() => handleProcessPayroll(selectedCycle)} 
+                className="bg-neutral-900 text-white gap-2"
+                disabled={isProcessing}
+              >
+                {isProcessing ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Play className="w-4 h-4" />
+                )}
+                {isProcessing ? 'Processing...' : 'Process Payroll'}
               </Button>
             )}
              {selectedCycle.status === 'completed' && (
@@ -1824,31 +1923,65 @@ const Payroll = () => {
                   onClick={() => handleRejectBatch(selectedCycle.id)} 
                   variant="outline" 
                   className="text-red-600 border-red-200 hover:bg-red-50 gap-2 h-9"
+                  disabled={isRejecting}
                 >
-                  <XCircle className="w-4 h-4" />
-                  Reject Batch
+                  {isRejecting ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-red-600" />
+                  ) : (
+                    <XCircle className="w-4 h-4" />
+                  )}
+                  {isRejecting ? 'Rejecting...' : 'Reject Batch'}
                 </Button>
                 <Button 
                   onClick={() => handleApproveBatch(selectedCycle.id)} 
                   className="bg-zinc-950 text-white gap-2 h-9"
+                  disabled={isApproving}
                 >
-                  <CheckCircle2 className="w-4 h-4" />
-                  Approve Batch
+                  {isApproving ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4" />
+                  )}
+                  {isApproving ? 'Approving...' : 'Approve Batch'}
                 </Button>
-                <Button onClick={() => handleRevertToDraft(selectedCycle)} variant="ghost" size="sm" className="text-neutral-400">
+                <Button 
+                  onClick={() => handleRevertToDraft(selectedCycle)} 
+                  variant="ghost" 
+                  size="sm" 
+                  className="text-neutral-400 gap-1"
+                  disabled={isReverting}
+                >
+                  {isReverting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   Revert to Draft
                 </Button>
               </div>
             )}
             {selectedCycle.status === 'approved' && (
               <>
-                <Button onClick={() => handleRevertToDraft(selectedCycle)} variant="outline" className="gap-2">
-                  <ArrowLeft className="w-4 h-4" />
+                <Button 
+                  onClick={() => handleRevertToDraft(selectedCycle)} 
+                  variant="outline" 
+                  className="gap-2"
+                  disabled={isReverting}
+                >
+                  {isReverting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <ArrowLeft className="w-4 h-4" />
+                  )}
                   Back to Draft
                 </Button>
-                <Button onClick={() => handleDisburse(selectedCycle)} className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2">
-                  <DollarSign className="w-4 h-4" />
-                  Disburse Funds
+                <Button 
+                  onClick={() => handleDisburse(selectedCycle)} 
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2"
+                  disabled={isDisbursing}
+                >
+                  {isDisbursing ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <DollarSign className="w-4 h-4" />
+                  )}
+                  {isDisbursing ? 'Disbursing...' : 'Disburse Funds'}
                 </Button>
               </>
             )}
@@ -1857,8 +1990,18 @@ const Payroll = () => {
                 <Badge className="bg-red-100 text-red-800 uppercase tracking-widest text-[10px] border-0 h-9 font-bold px-3">
                   Batch Rejected
                 </Badge>
-                <Button onClick={() => handleRevertToDraft(selectedCycle)} variant="outline" size="sm" className="gap-2">
-                  <ArrowLeft className="w-4 h-4" />
+                <Button 
+                  onClick={() => handleRevertToDraft(selectedCycle)} 
+                  variant="outline" 
+                  size="sm" 
+                  className="gap-2"
+                  disabled={isReverting}
+                >
+                  {isReverting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <ArrowLeft className="w-4 h-4" />
+                  )}
                   Revert to Draft
                 </Button>
               </div>
@@ -1913,22 +2056,52 @@ const Payroll = () => {
               </div>
               <div className="flex items-center gap-2 border-l border-neutral-200 pl-4">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-400 mr-2">Export Report</p>
-                <Button variant="outline" size="sm" onClick={downloadTablePDF} className="gap-2 h-9 bg-white">
-                  <FileText className="w-4 h-4" />
-                  PDF Report
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={downloadTablePDF} 
+                  className="gap-2 h-9 bg-white"
+                  disabled={isExportingPDF || isExportingExcel || isExportingSlips}
+                >
+                  {isExportingPDF ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-neutral-600" />
+                  ) : (
+                    <FileText className="w-4 h-4" />
+                  )}
+                  {isExportingPDF ? 'Exporting PDF...' : 'PDF Report'}
                 </Button>
-                <Button variant="outline" size="sm" onClick={downloadAllExcel} className="gap-2 h-9 bg-white">
-                  <Download className="w-4 h-4" />
-                  Excel Report
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={downloadAllExcel} 
+                  className="gap-2 h-9 bg-white"
+                  disabled={isExportingPDF || isExportingExcel || isExportingSlips}
+                >
+                  {isExportingExcel ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-neutral-600" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  {isExportingExcel ? 'Exporting Excel...' : 'Excel Report'}
                 </Button>
               </div>
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 border-r border-neutral-200 pr-3">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-neutral-400 font-sans">Payslips</p>
-                <Button variant="ghost" size="sm" onClick={downloadAllPDF} className="gap-2 h-9 text-neutral-600 hover:text-neutral-900 font-sans">
-                  <Download className="w-4 h-4" />
-                  All Slips
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={downloadAllPDF} 
+                  className="gap-2 h-9 text-neutral-600 hover:text-neutral-900 font-sans"
+                  disabled={isExportingPDF || isExportingExcel || isExportingSlips}
+                >
+                  {isExportingSlips ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-neutral-600" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  {isExportingSlips ? 'Generating...' : 'All Slips'}
                 </Button>
               </div>
               {selectedCycle.status === 'draft' && (
@@ -1951,8 +2124,45 @@ const Payroll = () => {
               </div>
             </div>
           </div>
-            <div className="flex flex-col gap-6 bg-white p-6 border border-neutral-200 rounded-lg shadow-sm">
-              {/* SLSU General Payroll Header Block (classic spreadsheet style) */}
+            {entriesLoading ? (
+              <div className="flex flex-col gap-6 bg-white p-6 border border-neutral-200 rounded-lg shadow-sm">
+                {/* SLSU General Payroll Header Block (classic spreadsheet style) */}
+                <div className="font-serif select-none text-neutral-900 pb-3 animate-pulse">
+                  <div className="h-8 w-64 bg-neutral-200 rounded mb-2" />
+                  <div className="h-5 w-48 bg-neutral-200 rounded mb-4" />
+                  <div className="space-y-2">
+                    <div className="h-4 w-96 bg-neutral-200 rounded" />
+                    <div className="h-4 w-32 bg-neutral-200 rounded" />
+                  </div>
+                </div>
+                
+                <div className="flex flex-col items-center justify-center min-h-[350px] border border-neutral-200 rounded-lg bg-neutral-50/50 p-8">
+                  <Loader2 className="w-10 h-10 text-neutral-900 animate-spin mb-4" />
+                  <h3 className="text-base font-semibold text-neutral-900 font-sans">Loading General Payroll Spreadsheet</h3>
+                  <p className="text-sm text-neutral-500 max-w-sm text-center mt-1 font-sans">
+                    Generating classic SLSU General Payroll sheets with system-calculated GSIS, PAG-IBIG, and Tax deductions.
+                  </p>
+                  
+                  {/* Fake skeleton spreadsheet grid */}
+                  <div className="w-full mt-8 space-y-3 opacity-40">
+                    <div className="grid grid-cols-6 gap-2">
+                      {Array.from({ length: 6 }).map((_, i) => (
+                        <div key={i} className="h-8 bg-neutral-200 rounded animate-pulse" />
+                      ))}
+                    </div>
+                    {Array.from({ length: 4 }).map((_, r) => (
+                      <div key={r} className="grid grid-cols-6 gap-2">
+                        {Array.from({ length: 6 }).map((_, c) => (
+                          <div key={c} className="h-6 bg-neutral-100 rounded animate-pulse" />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-6 bg-white p-6 border border-neutral-200 rounded-lg shadow-sm">
+                {/* SLSU General Payroll Header Block (classic spreadsheet style) */}
               <div className="font-serif select-text text-neutral-900 pb-3">
                 <h1 className="text-[25px] font-bold text-black uppercase tracking-tight leading-none mb-1.5 font-serif" id="slsu-general-payroll-title">GENERAL PAYROLL</h1>
                 <h2 className="text-[17px] font-bold text-black mb-3 font-serif">
@@ -2743,6 +2953,7 @@ const Payroll = () => {
               </table>
               </div>
             </div>
+            )}
         </div>
       </div>
       ) : (
@@ -2878,7 +3089,14 @@ const Payroll = () => {
                 </div>
               </div>
               <DialogFooter>
-                <Button type="submit" className="w-full bg-neutral-900 text-white">Create Cycle</Button>
+                <Button 
+                  type="submit" 
+                  className="w-full bg-neutral-900 text-white gap-2"
+                  disabled={isCreatingCycle}
+                >
+                  {isCreatingCycle && <Loader2 className="w-4 h-4 animate-spin text-white" />}
+                  {isCreatingCycle ? 'Creating Cycle...' : 'Create Cycle'}
+                </Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -3014,7 +3232,7 @@ const Payroll = () => {
               <Table>
                 <TableHeader className="bg-neutral-50 sticky top-0">
                   <TableRow>
-                    <TableHead className="font-bold text-xs">BPNO</TableHead>
+                    <TableHead className="font-bold text-xs">ID</TableHead>
                     <TableHead className="font-bold text-xs">Full Name & Mapping</TableHead>
                     <TableHead className="font-bold text-xs text-right">Overrides/Deductions Total</TableHead>
                     <TableHead className="font-bold text-xs text-center">Status</TableHead>
@@ -3078,7 +3296,7 @@ const Payroll = () => {
                                         ...newData[i],
                                         matchedEntryId: val,
                                         employeeName: `${matchingEmp.lastName}, ${matchingEmp.firstName}`,
-                                        friendlyEmployeeId: matchingEmp.employeeId || matchingEmp.bpno,
+                                        friendlyEmployeeId: matchingEmp.employeeNo || matchingEmp.employeeId || matchingEmp.bpno,
                                         isMatched: true,
                                         isAutoAdd: true,
                                         matchedEmployeeId: matchingEmp.id
@@ -3114,7 +3332,7 @@ const Payroll = () => {
                                     .filter((emp: any) => !entries.some((e: any) => e.employeeId === emp.id))
                                     .map((emp: any) => (
                                       <option key={emp.id} value={`new-emp-${emp.id}`}>
-                                        ✨ {emp.lastName}, {emp.firstName} ({emp.employeeId || emp.bpno || 'DRAFT'})
+                                        ✨ {emp.lastName}, {emp.firstName} ({emp.employeeNo || emp.employeeId || emp.bpno || 'DRAFT'})
                                       </option>
                                     ))}
                                 </optgroup>

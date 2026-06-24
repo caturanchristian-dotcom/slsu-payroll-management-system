@@ -321,7 +321,7 @@ async function initDb() {
     await ensureColumn("employees", "hasSss", "INTEGER DEFAULT 0");
     await ensureColumn("employees", "hasPhilhealth", "INTEGER DEFAULT 0");
     await ensureColumn("employees", "hasPagibig", "INTEGER DEFAULT 0");
-    for (const col of ['bpno', 'mi', 'prefix', 'appellation', 'birthDate', 'crn', 'effectivityDate', 'position']) {
+    for (const col of ['bpno', 'mi', 'prefix', 'appellation', 'birthDate', 'crn', 'effectivityDate', 'position', 'employeeNo']) {
       await ensureColumn("employees", col, "TEXT");
     }
     await ensureColumn("employees", "gender", "TEXT DEFAULT 'MALE'");
@@ -593,6 +593,172 @@ async function initDb() {
       await db.prepare("UPDATE employees SET category = 'Visiting Instructor' WHERE category = 'Part-time'").run();
     } catch (migErr) {
       // Ignored in silent mode
+    }
+
+    // Seed 48 default employees if empty
+    try {
+      const empCount = await db.prepare("SELECT COUNT(*) as count FROM employees WHERE id NOT LIKE 'admin-%'").get() as any;
+      if (empCount && empCount.count === 0) {
+        console.log("[Seeding] Database contains no non-admin employees. Seeding 48 default employees from the registry...");
+        const seedEmps = [
+          // FACULTY: MALE
+          { lastName: "Baclayon", firstName: "Jacinto Jr.", mi: "P.", position: "Assistant Professor IV", category: "FACULTY", gender: "MALE", employeeNo: "94", bpno: "200094" },
+          { lastName: "Balili", firstName: "Danilo", mi: "A.", position: "", category: "FACULTY", gender: "MALE", employeeNo: "19", bpno: "200019" },
+          { lastName: "Gapasin", firstName: "John Paul", mi: "R.", position: "Asst. Prof III", category: "FACULTY", gender: "MALE", employeeNo: "23", bpno: "200023" },
+          { lastName: "Granada", firstName: "Dominador", mi: "P.", position: "Assistant Professor I", category: "FACULTY", gender: "MALE", employeeNo: "178", bpno: "200178" },
+          { lastName: "Lim", firstName: "Wade", mi: "C.", position: "Associate Professor II", category: "FACULTY", gender: "MALE", employeeNo: "15", bpno: "200015" },
+          { lastName: "Manun-og", firstName: "Mondani", mi: "R.", position: "Associate Professor II", category: "FACULTY", gender: "MALE", employeeNo: "29", bpno: "200029" },
+          { lastName: "Manun-og", firstName: "Ruther", mi: "B.", position: "Assistant Professor II", category: "FACULTY", gender: "MALE", employeeNo: "85", bpno: "200085" },
+          { lastName: "Mondragon", firstName: "G-mar", mi: "D.", position: "Instructor I", category: "FACULTY", gender: "MALE", employeeNo: "156", bpno: "200156" },
+          { lastName: "Napala", firstName: "Irvin Lito", mi: "O.", position: "Associate Professor", category: "FACULTY", gender: "MALE", employeeNo: "23", bpno: "200233" },
+          { lastName: "Navarrete", firstName: "Ian", mi: "A.", position: "Associate Professor IV", category: "FACULTY", gender: "MALE", employeeNo: "187", bpno: "200187" },
+
+          // FACULTY: FEMALE
+          { lastName: "Almine", firstName: "Mary", mi: "D.", position: "Instructor I", category: "FACULTY", gender: "FEMALE", employeeNo: "188", bpno: "200188" },
+          { lastName: "Aquino", firstName: "Ana Mae", mi: "", position: "Instructor I", category: "FACULTY", gender: "FEMALE", employeeNo: "295", bpno: "200295" },
+          { lastName: "Capapas", firstName: "Meryl", mi: "V.", position: "Assistant Professor I", category: "FACULTY", gender: "FEMALE", employeeNo: "162", bpno: "200162" },
+          { lastName: "Cupat", firstName: "Leonisa", mi: "H.", position: "Instructor I", category: "FACULTY", gender: "FEMALE", employeeNo: "195", bpno: "200195" },
+          { lastName: "Manun-og", firstName: "Madelyn", mi: "B.", position: "Assistant Professor IV", category: "FACULTY", gender: "FEMALE", employeeNo: "25", bpno: "200025" },
+          { lastName: "Membreve", firstName: "Christselda", mi: "S.", position: "Instructor I", category: "FACULTY", gender: "FEMALE", employeeNo: "414", bpno: "200414" },
+          { lastName: "Nuñez", firstName: "Edelyn", mi: "P.", position: "Instructor I", category: "FACULTY", gender: "FEMALE", employeeNo: "415", bpno: "200415" },
+          { lastName: "Piamonte", firstName: "Rojelyn", mi: "P.", position: "Instructor I", category: "FACULTY", gender: "FEMALE", employeeNo: "416", bpno: "200416" },
+          { lastName: "Pernites", firstName: "Ma. Emma Suzette", mi: "M.", position: "Assistant Professor I", category: "FACULTY", gender: "FEMALE", employeeNo: "161", bpno: "200161" },
+          { lastName: "Pille", firstName: "Roxan", mi: "D.", position: "Assistant Professor III", category: "FACULTY", gender: "FEMALE", employeeNo: "123", bpno: "200123" },
+          { lastName: "Regis", firstName: "Mary Ann Jully", mi: "B.", position: "Associate Professor III", category: "FACULTY", gender: "FEMALE", employeeNo: "67", bpno: "200067" },
+          { lastName: "Rosolada", firstName: "Romecita", mi: "R.", position: "Professor VI", category: "FACULTY", gender: "FEMALE", employeeNo: "21", bpno: "200021" },
+          { lastName: "Saludsod", firstName: "Mary beth", mi: "T.", position: "Associate Professor V", category: "FACULTY", gender: "FEMALE", employeeNo: "27", bpno: "200027" },
+
+          // STAFF: MALE
+          { lastName: "Amod", firstName: "Gary", mi: "S.", position: "Security Guard II", category: "STAFF", gender: "MALE", employeeNo: "039", bpno: "200039" },
+          { lastName: "Bugais", firstName: "Noel", mi: "S.", position: "Admin Officer IV", category: "STAFF", gender: "MALE", employeeNo: "148", bpno: "200148" },
+          { lastName: "Butac", firstName: "Cyclaus", mi: "P.", position: "ADA6(Clerk3)", category: "STAFF", gender: "MALE", employeeNo: "431", bpno: "200431" },
+          { lastName: "Fiel", firstName: "Ernie", mi: "D.", position: "FAWK II", category: "STAFF", gender: "MALE", employeeNo: "64", bpno: "200064" },
+          { lastName: "Humangit", firstName: "Antonio", mi: "N.", position: "ADA IV", category: "STAFF", gender: "MALE", employeeNo: "20", bpno: "200020" },
+          { lastName: "Molita", firstName: "Chris Jirah", mi: "E.", position: "Records Officer I", category: "STAFF", gender: "MALE", employeeNo: "200", bpno: "200200" },
+          { lastName: "Mulig", firstName: "Gamebert", mi: "T.", position: "A.O. 5", category: "STAFF", gender: "MALE", employeeNo: "", bpno: "200330" },
+          { lastName: "Pasayan", firstName: "Jonathan", mi: "L.", position: "ADAS V", category: "STAFF", gender: "MALE", employeeNo: "100", bpno: "200100" },
+          { lastName: "Quintana", firstName: "Ariel", mi: "R.", position: "Property Custodian", category: "STAFF", gender: "MALE", employeeNo: "918", bpno: "200918" },
+          { lastName: "Roculas", firstName: "Roland", mi: "A.", position: "FAWK II", category: "STAFF", gender: "MALE", employeeNo: "15", bpno: "200016" },
+          { lastName: "Rojas", firstName: "Joselito", mi: "S.", position: "Cashier II", category: "STAFF", gender: "MALE", employeeNo: "11", bpno: "200011" },
+          { lastName: "Valerio", firstName: "Glen Zimore", mi: "", position: "Clerk III", category: "STAFF", gender: "MALE", employeeNo: "", bpno: "200335" },
+
+          // STAFF: FEMALE
+          { lastName: "Agad", firstName: "Rosebeb", mi: "", position: "Clerk III", category: "STAFF", gender: "FEMALE", employeeNo: "423", bpno: "200423" },
+          { lastName: "Batiancila", firstName: "Sebian", mi: "M.", position: "Budgeting Assistant", category: "STAFF", gender: "FEMALE", employeeNo: "424", bpno: "200424" },
+          { lastName: "Bugais-Pagobo", firstName: "Charisse Ann", mi: "S.", position: "Guidance Counselor II", category: "STAFF", gender: "FEMALE", employeeNo: "411", bpno: "200411" },
+          { lastName: "Caberte", firstName: "Leslie Anne", mi: "C.", position: "Accountant II", category: "STAFF", gender: "FEMALE", employeeNo: "225", bpno: "200225" },
+          { lastName: "Carbonilla", firstName: "Joje Marie", mi: "P.", position: "ADAS II(M & Aud.Ast)", category: "STAFF", gender: "FEMALE", employeeNo: "457", bpno: "200457" },
+          { lastName: "Cuenco", firstName: "Rubie", mi: "P.", position: "Clerk III", category: "STAFF", gender: "FEMALE", employeeNo: "715", bpno: "200715" },
+          { lastName: "Cruzada", firstName: "Marjorie", mi: "", position: "Cash Clerk", category: "STAFF", gender: "FEMALE", employeeNo: "735", bpno: "200735" },
+          { lastName: "De la Cruz", firstName: "Chanson Angelica", mi: "C.", position: "Clerk III", category: "STAFF", gender: "FEMALE", employeeNo: "263", bpno: "200263" },
+          { lastName: "Marucot", firstName: "Azila", mi: "M.", position: "ADOF 3 (SuppOfficer I)", category: "STAFF", gender: "FEMALE", employeeNo: "28", bpno: "200028" },
+          { lastName: "Orias", firstName: "Carol Ann", mi: "B.", position: "HRMO II", category: "STAFF", gender: "FEMALE", employeeNo: "22", bpno: "200022" },
+          { lastName: "Paug", firstName: "Febie", mi: "D.", position: "Supply Officer I", category: "STAFF", gender: "FEMALE", employeeNo: "56", bpno: "200056" },
+          { lastName: "Sinahon", firstName: "Chrestian Jede", mi: "T.", position: "ADA VI (Clerk III)", category: "STAFF", gender: "FEMALE", employeeNo: "248", bpno: "200248" },
+          { lastName: "Tiin", firstName: "Clarish", mi: "T.", position: "ADAS3 (SenBkpr)", category: "STAFF", gender: "FEMALE", employeeNo: "425", bpno: "200425" }
+        ];
+
+        await db.transaction(async () => {
+          for (let i = 0; i < seedEmps.length; i++) {
+            const emp = seedEmps[i];
+            const id = `emp-${Date.now()}-${i}`;
+            const employeeId = emp.bpno;
+            const baseSalary = emp.category === "FACULTY" ? 35000 : 25000;
+            const email = `${emp.firstName.toLowerCase().replace(/\s+/g, '')}.${emp.lastName.toLowerCase()}@slsu.edu.ph`;
+
+            await db.prepare(`
+              INSERT INTO employees (
+                id, employeeId, firstName, lastName, email, category, basicSalary, salaryType, status,
+                bpno, mi, position, gender, employeeNo, phoneNumber, hasSss, hasPhilhealth, hasPagibig
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              id, employeeId, emp.firstName, emp.lastName, email, emp.category, baseSalary, 'monthly', 'active',
+              emp.bpno, emp.mi, emp.position, emp.gender, emp.employeeNo, '09171234567', 0, 0, 0
+            );
+
+            // Seed as user
+            const plainPassword = `${emp.lastName.toLowerCase()}123`;
+            await db.prepare(`
+              INSERT OR IGNORE INTO users (id, email, password, displayName, role)
+              VALUES (?, ?, ?, ?, ?)
+            `).run(id, email, plainPassword, `${emp.firstName} ${emp.lastName}`, 'employee');
+          }
+        })();
+        console.log(`[Seeding] Successfully seeded ${seedEmps.length} default employees!`);
+      }
+
+      // Automatically update/normalize all existing employees' employeeNo from the image map
+      console.log("[Migration] Running automatic employeeNo updates from uploaded image data...");
+      const imageEmployeeNoUpdates = [
+        // FACULTY: MALE
+        { lastName: "Baclayon", firstName: "Jacinto Jr.", employeeNo: "94" },
+        { lastName: "Balili", firstName: "Danilo", employeeNo: "19" },
+        { lastName: "Gapasin", firstName: "John Paul", employeeNo: "23" },
+        { lastName: "Granada", firstName: "Dominador", employeeNo: "178" },
+        { lastName: "Lim", firstName: "Wade", employeeNo: "15" },
+        { lastName: "Manun-og", firstName: "Mondani", employeeNo: "29" },
+        { lastName: "Manun-og", firstName: "Ruther", employeeNo: "85" },
+        { lastName: "Mondragon", firstName: "G-mar", employeeNo: "156" },
+        { lastName: "Napala", firstName: "Irvin Lito", employeeNo: "23" },
+        { lastName: "Navarrete", firstName: "Ian", employeeNo: "187" },
+
+        // FACULTY: FEMALE
+        { lastName: "Almine", firstName: "Mary", employeeNo: "188" },
+        { lastName: "Aquino", firstName: "Ana Mae", employeeNo: "295" },
+        { lastName: "Capapas", firstName: "Meryl", employeeNo: "162" },
+        { lastName: "Cupat", firstName: "Leonisa", employeeNo: "195" },
+        { lastName: "Manun-og", firstName: "Madelyn", employeeNo: "25" },
+        { lastName: "Membreve", firstName: "Christselda", employeeNo: "414" },
+        { lastName: "Nuñez", firstName: "Edelyn", employeeNo: "415" },
+        { lastName: "Piamonte", firstName: "Rojelyn", employeeNo: "416" },
+        { lastName: "Pernites", firstName: "Ma. Emma Suzette", employeeNo: "161" },
+        { lastName: "Pille", firstName: "Roxan", employeeNo: "123" },
+        { lastName: "Regis", firstName: "Mary Ann Jully", employeeNo: "67" },
+        { lastName: "Rosolada", firstName: "Romecita", employeeNo: "21" },
+        { lastName: "Saludsod", firstName: "Mary beth", employeeNo: "27" },
+
+        // STAFF: MALE
+        { lastName: "Amod", firstName: "Gary", employeeNo: "039" },
+        { lastName: "Bugais", firstName: "Noel", employeeNo: "148" },
+        { lastName: "Butac", firstName: "Cyclaus", employeeNo: "431" },
+        { lastName: "Fiel", firstName: "Ernie", employeeNo: "64" },
+        { lastName: "Humangit", firstName: "Antonio", employeeNo: "20" },
+        { lastName: "Molita", firstName: "Chris Jirah", employeeNo: "200" },
+        { lastName: "Mulig", firstName: "Gamebert", employeeNo: "" },
+        { lastName: "Pasayan", Jonathan: "Jonathan", firstName: "Jonathan", employeeNo: "100" },
+        { lastName: "Quintana", firstName: "Ariel", employeeNo: "918" },
+        { lastName: "Roculas", firstName: "Roland", employeeNo: "15" },
+        { lastName: "Rojas", firstName: "Joselito", employeeNo: "11" },
+        { lastName: "Valerio", firstName: "Glen Zimore", employeeNo: "" },
+
+        // STAFF: FEMALE
+        { lastName: "Agad", firstName: "Rosebeb", employeeNo: "423" },
+        { lastName: "Batiancila", firstName: "Sebian", employeeNo: "424" },
+        { lastName: "Bugais-Pagobo", firstName: "Charisse Ann", employeeNo: "411" },
+        { lastName: "Caberte", firstName: "Leslie Anne", employeeNo: "225" },
+        { lastName: "Carbonilla", firstName: "Joje Marie", employeeNo: "457" },
+        { lastName: "Cuenco", firstName: "Rubie", employeeNo: "715" },
+        { lastName: "Cruzada", firstName: "Marjorie", employeeNo: "" },
+        { lastName: "De la Cruz", firstName: "Chanson Angelica", employeeNo: "263" },
+        { lastName: "Marucot", firstName: "Azila", employeeNo: "28" },
+        { lastName: "Orias", firstName: "Carol Ann", employeeNo: "22" },
+        { lastName: "Paug", firstName: "Febie", employeeNo: "56" },
+        { lastName: "Sinahon", firstName: "Chrestian Jede", employeeNo: "248" },
+        { lastName: "Tiin", firstName: "Clarish", employeeNo: "425" }
+      ];
+
+      await db.transaction(async () => {
+        for (const item of imageEmployeeNoUpdates) {
+          await db.prepare(`
+            UPDATE employees 
+            SET employeeNo = ? 
+            WHERE LOWER(lastName) = LOWER(?) AND LOWER(firstName) = LOWER(?)
+          `).run(item.employeeNo, item.lastName, item.firstName);
+        }
+      })();
+      console.log("[Migration] Successfully completed live database employeeNo updates!");
+    } catch (e: any) {
+      console.warn("Failed to seed default employees:", e.message);
     }
 
     // Done
@@ -1449,11 +1615,12 @@ async function startServer() {
   }));
 
   app.post("/api/employees", asyncHandler(async (req: any, res: any) => {
-    const { employeeId, firstName, lastName, email, password, category, basicSalary, salaryType, phoneNumber, hasSss, hasPhilhealth, hasPagibig, bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, profileImage } = req.body;
+    const { employeeId, firstName, lastName, email, password, category, basicSalary, salaryType, phoneNumber, hasSss, hasPhilhealth, hasPagibig, bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, profileImage, employeeNo } = req.body;
     const id = `emp-${Date.now()}`;
     const keySss = hasSss ? 1 : 0;
     const keyPh = hasPhilhealth ? 1 : 0;
     const keyPi = hasPagibig ? 1 : 0;
+    const finalEmployeeId = employeeId || bpno || id;
     try {
       await db.transaction(async () => {
         let finalGender = gender || 'MALE';
@@ -1477,18 +1644,18 @@ async function startServer() {
 
         await db.prepare(`INSERT INTO employees (
           id, employeeId, firstName, lastName, email, password, category, basicSalary, salaryType, phoneNumber, hasSss, hasPhilhealth, hasPagibig,
-          bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, profileImage
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          id, employeeId, firstName, lastName, email, password, category, basicSalary, salaryType || 'monthly', phoneNumber || '09171234567', keySss, keyPh, keyPi,
-          bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', finalGender, profileImage || ''
+          bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, profileImage, employeeNo
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          id, finalEmployeeId, firstName, lastName, email, password, category, basicSalary, salaryType || 'monthly', phoneNumber || '09171234567', keySss, keyPh, keyPi,
+          bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', finalGender, profileImage || '', employeeNo || ''
         );
         await db.prepare("INSERT OR REPLACE INTO users (id, email, password, displayName, role) VALUES (?, ?, ?, ?, ?)").run(
           id, email, password, `${firstName} ${lastName}`, 'employee'
         );
       })();
-      res.json({ id, ...req.body });
+      res.json({ id, ...req.body, employeeId: finalEmployeeId });
     } catch (error: any) {
-      if (error.message.includes('UNIQUE constraint failed')) res.status(400).json({ error: "Employee ID or Email already exists" });
+      if (error.message.includes('UNIQUE constraint failed')) res.status(400).json({ error: "BPNO/Employee ID or Email already exists" });
       else throw error;
     }
   }));
@@ -1526,13 +1693,15 @@ async function startServer() {
             crn,
             effectivityDate,
             position,
-            gender
+            gender,
+            employeeNo
           } = emp;
 
           // Check if employeeId already exists using employees table
-          const existingEmployee = await db.prepare("SELECT id FROM employees WHERE employeeId = ?").get(employeeId);
+          const finalEmployeeId = employeeId || bpno || `bulk-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          const existingEmployee = await db.prepare("SELECT id FROM employees WHERE employeeId = ?").get(finalEmployeeId);
           if (existingEmployee) {
-            skipped.push({ employeeId, reason: "Duplicate employee ID" });
+            skipped.push({ employeeId: finalEmployeeId, reason: "Duplicate employee ID/BPNO" });
             continue;
           }
 
@@ -1562,11 +1731,11 @@ async function startServer() {
 
           await db.prepare(`INSERT INTO employees (
             id, employeeId, firstName, lastName, email, password, category, basicSalary, salaryType, phoneNumber, status, hasSss, hasPhilhealth, hasPagibig,
-            bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-            id, employeeId, firstName, lastName, email, password, category || 'Regular Employee', basicSalary || 0, salaryType || 'monthly', phoneNumber || '09171234567',
+            bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, employeeNo
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            id, finalEmployeeId, firstName, lastName, email, password, category || 'Regular Employee', basicSalary || 0, salaryType || 'monthly', phoneNumber || '09171234567',
             keySss, keyPh, keyPi,
-            bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', finalGender
+            bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', finalGender, employeeNo || ''
           );
 
           await db.prepare("INSERT OR REPLACE INTO users (id, email, password, displayName, role) VALUES (?, ?, ?, ?, ?)").run(
@@ -1586,17 +1755,18 @@ async function startServer() {
   }));
 
   app.put("/api/employees/:id", asyncHandler(async (req: any, res: any) => {
-    const { employeeId, firstName, lastName, email, password, category, basicSalary, salaryType, status, phoneNumber, hasSss, hasPhilhealth, hasPagibig, bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, profileImage } = req.body;
+    const { employeeId, firstName, lastName, email, password, category, basicSalary, salaryType, status, phoneNumber, hasSss, hasPhilhealth, hasPagibig, bpno, mi, prefix, appellation, birthDate, crn, effectivityDate, position, gender, profileImage, employeeNo } = req.body;
     const keySss = hasSss ? 1 : 0;
     const keyPh = hasPhilhealth ? 1 : 0;
     const keyPi = hasPagibig ? 1 : 0;
+    const finalEmployeeId = employeeId || bpno || req.params.id;
     try {
       await db.transaction(async () => {
-        let empQuery = "UPDATE employees SET employeeId = ?, firstName = ?, lastName = ?, email = ?, category = ?, basicSalary = ?, salaryType = ?, status = ?, phoneNumber = ?, hasSss = ?, hasPhilhealth = ?, hasPagibig = ?, bpno = ?, mi = ?, prefix = ?, appellation = ?, birthDate = ?, crn = ?, effectivityDate = ?, position = ?, gender = ?, profileImage = ?";
+        let empQuery = "UPDATE employees SET employeeId = ?, firstName = ?, lastName = ?, email = ?, category = ?, basicSalary = ?, salaryType = ?, status = ?, phoneNumber = ?, hasSss = ?, hasPhilhealth = ?, hasPagibig = ?, bpno = ?, mi = ?, prefix = ?, appellation = ?, birthDate = ?, crn = ?, effectivityDate = ?, position = ?, gender = ?, profileImage = ?, employeeNo = ?";
         let empParams: any[] = [
-          employeeId, firstName, lastName, email, category, basicSalary, salaryType || 'monthly', status, phoneNumber || '09171234567',
+          finalEmployeeId, firstName, lastName, email, category, basicSalary, salaryType || 'monthly', status, phoneNumber || '09171234567',
           keySss, keyPh, keyPi,
-          bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', gender || 'MALE', profileImage || '',
+          bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', gender || 'MALE', profileImage || '', employeeNo || '',
         ];
         if (password?.trim()) {
           empQuery += ", password = ?";
@@ -1616,9 +1786,9 @@ async function startServer() {
         userParams.push(req.params.id);
         await db.prepare(userQuery).run(...userParams);
       })();
-      res.json({ id: req.params.id, ...req.body });
+      res.json({ id: req.params.id, ...req.body, employeeId: finalEmployeeId });
     } catch (error: any) {
-      if (error.message.includes('UNIQUE constraint failed')) res.status(400).json({ error: "Employee ID already exists" });
+      if (error.message.includes('UNIQUE constraint failed')) res.status(400).json({ error: "BPNO/Employee ID already exists" });
       else throw error;
     }
   }));
@@ -2007,7 +2177,7 @@ async function startServer() {
       await recalculateCycle(req.params.id);
     }
     const entries = await db.prepare(`
-      SELECT pe.*, e.employeeId as friendlyEmployeeId, e.category, e.basicSalary, e.salaryType, e.hasSss, e.hasPhilhealth, e.hasPagibig, e.bpno, e.firstName, e.lastName, e.position, e.gender
+      SELECT pe.*, COALESCE(NULLIF(e.employeeNo, ''), e.employeeId) as friendlyEmployeeId, e.category, e.basicSalary, e.salaryType, e.hasSss, e.hasPhilhealth, e.hasPagibig, e.bpno, e.firstName, e.lastName, e.position, e.gender
       FROM payroll_entries pe
       JOIN employees e ON pe.employeeId = e.id
       WHERE pe.cycleId = ?

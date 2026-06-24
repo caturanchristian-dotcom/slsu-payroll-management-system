@@ -946,7 +946,7 @@ const Deductions = () => {
         <div className="relative flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
           <Input 
-            placeholder="Search by employee name or BPNO/ID..." 
+            placeholder="Search by employee name or ID..." 
             className="pl-10 bg-white border-neutral-300"
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
@@ -1250,7 +1250,7 @@ const Deductions = () => {
               <Table>
                 <TableHeader className="bg-neutral-50 sticky top-0">
                   <TableRow>
-                    <TableHead className="font-bold text-xs bg-neutral-50">BPNO / ID</TableHead>
+                    <TableHead className="font-bold text-xs bg-neutral-50">ID</TableHead>
                     <TableHead className="font-bold text-xs bg-neutral-50">Employee Name</TableHead>
                     <TableHead className="font-bold text-xs bg-neutral-50">Category</TableHead>
                     <TableHead className="font-bold text-xs text-right bg-neutral-50">Amount (₱)</TableHead>

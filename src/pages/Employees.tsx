@@ -165,7 +165,8 @@ const Employees = () => {
     effectivityDate: '',
     position: '',
     gender: 'MALE',
-    profileImage: ''
+    profileImage: '',
+    employeeNo: ''
   });
 
   const [categoryFormData, setCategoryFormData] = useState({
@@ -320,7 +321,8 @@ const Employees = () => {
       effectivityDate: '',
       position: '',
       gender: 'MALE',
-      profileImage: ''
+      profileImage: '',
+      employeeNo: ''
     });
   };
 
@@ -332,8 +334,8 @@ const Employees = () => {
 
     try {
       const headers = [
-        "BPNO",
-        "Employee ID",
+        "ID",
+        "Employee No.",,
         "Last Name",
         "First Name",
         "MI",
@@ -356,7 +358,7 @@ const Employees = () => {
 
       const dataRows = filteredEmployees.map(emp => [
         emp.bpno || "",
-        emp.employeeId || "",
+        emp.employeeNo || "",
         emp.lastName || "",
         emp.firstName || "",
         emp.mi || "",
@@ -545,7 +547,7 @@ const Employees = () => {
               }
             }
 
-            // Bold styling for Employee IDs & BPNO to stand out structurally
+            // Bold styling for Employee IDs & ID to stand out structurally
             if (c === 0 || c === 1) {
               worksheet[cellRef].s.font.bold = true;
             }
@@ -666,10 +668,10 @@ const Employees = () => {
         for (let i = 0; i < rawRows.length; i++) {
           const row = rawRows[i];
           if (Array.isArray(row)) {
-            // Checks if one of the core cells contains BPNO, LastName, FirstName, Name, or Position
+            // Checks if one of the core cells contains ID, BPNO, LastName, FirstName, Name, or Position
             const hasHeaderIndicator = row.some(cell => {
               const str = String(cell || '').trim().toLowerCase();
-              return str === 'bpno' || str === 'lastname' || str === 'firstname' || str === 'name' || str === 'position';
+              return str === 'bpno' || str === 'id' || str === 'lastname' || str === 'firstname' || str === 'name' || str === 'position';
             });
             if (hasHeaderIndicator) {
               headerRowIndex = i;
@@ -705,7 +707,7 @@ const Employees = () => {
           };
 
           // Read the matching values
-          const bpnoVal = getVal(['BPNO']);
+          const bpnoVal = getVal(['ID', 'BPNO']);
           let lastName = getVal(['LastName', 'last_name', 'Surname', 'family_name', 'familyname']);
           let firstName = getVal(['FirstName', 'first_name', 'GivenName', 'given_name']);
           let mi = getVal(['MI', 'middle_initial', 'MiddleInitial', 'mi']);
@@ -1496,22 +1498,22 @@ const Employees = () => {
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="employeeId">Employee ID</Label>
+                    <Label htmlFor="employeeNo">Employee No.</Label>
                     <Input 
-                      id="employeeId" 
-                      placeholder="SLSU-2024-001" 
-                      value={formData.employeeId}
-                      onChange={e => setFormData({...formData, employeeId: e.target.value})}
-                      required
+                      id="employeeNo" 
+                      placeholder="e.g. 188" 
+                      value={formData.employeeNo}
+                      onChange={e => setFormData({...formData, employeeNo: e.target.value})}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="bpno">BPNO</Label>
+                    <Label htmlFor="bpno">ID</Label>
                     <Input 
                       id="bpno" 
                       placeholder="e.g. 200012345" 
                       value={formData.bpno}
                       onChange={e => setFormData({...formData, bpno: e.target.value})}
+                      required
                     />
                   </div>
                 </div>
@@ -1966,8 +1968,8 @@ const Employees = () => {
                           {emp.appellation ? ` ${emp.appellation}` : ''}
                         </div>
                         <div className="text-xs text-neutral-400 font-mono flex flex-wrap gap-x-2 gap-y-0.5">
-                          <span>ID: {emp.employeeId}</span>
-                          {emp.bpno && <span>• BPNO: {emp.bpno}</span>}
+                          {emp.bpno && <span>ID: {emp.bpno}</span>}
+                          {emp.employeeNo && <span>• Emp. No.: {emp.employeeNo}</span>}
                           {emp.crn && <span>• CRN: {emp.crn}</span>}
                         </div>
                       </div>
@@ -2046,7 +2048,8 @@ const Employees = () => {
                             effectivityDate: emp.effectivityDate || '',
                             position: emp.position || '',
                             gender: emp.gender || 'MALE',
-                            profileImage: emp.profileImage || ''
+                            profileImage: emp.profileImage || '',
+                            employeeNo: emp.employeeNo || ''
                           });
                           setIsAddOpen(true);
                         }}>
@@ -2098,7 +2101,10 @@ const Employees = () => {
                     {selectedEmployee.position}
                   </p>
                 )}
-                <p className="text-xs font-mono text-neutral-400 mb-4">{selectedEmployee.employeeId}</p>
+                <p className="text-xs font-mono text-neutral-400 mb-4">
+                  {selectedEmployee.bpno && `ID: ${selectedEmployee.bpno}`}
+                  {selectedEmployee.employeeNo && ` • Emp. No.: ${selectedEmployee.employeeNo}`}
+                </p>
                 
                 <Badge className={cn("mb-8 font-bold uppercase tracking-widest px-3 py-1 text-[10px]", getStatusColor(selectedEmployee.status))}>
                   {selectedEmployee.status}
@@ -2234,12 +2240,12 @@ const Employees = () => {
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
                           <div>
-                            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mb-1">BPNO</p>
+                            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mb-1">ID</p>
                             <p className="text-sm font-semibold text-neutral-900 font-mono">{selectedEmployee.bpno || 'N/A'}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mb-1">CRN ID</p>
-                            <p className="text-sm font-semibold text-neutral-900 font-mono">{selectedEmployee.crn || 'N/A'}</p>
+                            <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mb-1">Employee No.</p>
+                            <p className="text-sm font-semibold text-neutral-900 font-mono">{selectedEmployee.employeeNo || 'N/A'}</p>
                           </div>
                           <div>
                             <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest mb-1">Birth Date</p>
@@ -2489,7 +2495,7 @@ const Employees = () => {
               <Table>
                 <TableHeader className="bg-neutral-50 sticky top-0">
                   <TableRow>
-                    <TableHead className="font-bold text-xs">BPNO</TableHead>
+                    <TableHead className="font-bold text-xs">ID</TableHead>
                     <TableHead className="font-bold text-xs">Full Name</TableHead>
                     <TableHead className="font-bold text-xs">Position</TableHead>
                     <TableHead className="font-bold text-xs">CRN</TableHead>

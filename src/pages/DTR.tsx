@@ -892,7 +892,7 @@ const DTR = () => {
   };
 
   // CSC Parser of am/pm logs on a specific day
-  const getDayPunches = (dayLogs: DTRLog[], dateStrOverride?: string) => {
+  const getDayPunchesInner = (dayLogs: DTRLog[], dateStrOverride?: string) => {
     let amIn = '---';
     let amOut = '---';
     let pmIn = '---';
@@ -954,7 +954,7 @@ const DTR = () => {
         const firstAM = morningLogs[0];
         amInDate = parseLocalDateNoShift(firstAM.timeIn);
         if (amInDate) {
-          amInVal = format(amInDate, 'HH:mm');
+          amInVal = format(amInDate, 'h:mm');
           pickerAmInVal = format(amInDate, 'HH:mm');
         }
 
@@ -964,11 +964,11 @@ const DTR = () => {
           if (lastAMOut) {
             if (lastAMOut.getHours() < 13) {
               amOutDate = lastAMOut;
-              amOutVal = format(amOutDate, 'HH:mm');
+              amOutVal = format(amOutDate, 'h:mm');
               pickerAmOutVal = format(amOutDate, 'HH:mm');
             } else {
               pmOutDate = lastAMOut;
-              pmOutVal = format(pmOutDate, 'HH:mm');
+              pmOutVal = format(pmOutDate, 'h:mm');
               pickerPmOutVal = format(pmOutDate, 'HH:mm');
             }
           }
@@ -979,7 +979,7 @@ const DTR = () => {
         const firstPM = afternoonLogs[0];
         pmInDate = parseLocalDateNoShift(firstPM.timeIn);
         if (pmInDate) {
-          pmInVal = format(pmInDate, 'HH:mm');
+          pmInVal = format(pmInDate, 'h:mm');
           pickerPmInVal = format(pmInDate, 'HH:mm');
         }
 
@@ -987,7 +987,7 @@ const DTR = () => {
         if (lastPMWithOut && lastPMWithOut.timeOut) {
           pmOutDate = parseLocalDateNoShift(lastPMWithOut.timeOut);
           if (pmOutDate) {
-            pmOutVal = format(pmOutDate, 'HH:mm');
+            pmOutVal = format(pmOutDate, 'h:mm');
             pickerPmOutVal = format(pmOutDate, 'HH:mm');
           }
         }
@@ -1084,13 +1084,13 @@ const DTR = () => {
       const primaryAM = sorted[0];
       amInDate = parseLocalDateNoShift(primaryAM.timeIn);
       if (amInDate) {
-        amIn = format(amInDate, 'HH:mm');
+        amIn = format(amInDate, 'h:mm');
         pickerAmIn = format(amInDate, 'HH:mm');
       }
       if (primaryAM.timeOut) {
         amOutDate = parseLocalDateNoShift(primaryAM.timeOut);
         if (amOutDate) {
-          amOut = format(amOutDate, 'HH:mm');
+          amOut = format(amOutDate, 'h:mm');
           pickerAmOut = format(amOutDate, 'HH:mm');
         }
       }
@@ -1098,13 +1098,13 @@ const DTR = () => {
       const primaryPM = sorted[1];
       pmInDate = parseLocalDateNoShift(primaryPM.timeIn);
       if (pmInDate) {
-        pmIn = format(pmInDate, 'HH:mm');
+        pmIn = format(pmInDate, 'h:mm');
         pickerPmIn = format(pmInDate, 'HH:mm');
       }
       if (primaryPM.timeOut) {
         pmOutDate = parseLocalDateNoShift(primaryPM.timeOut);
         if (pmOutDate) {
-          pmOut = format(pmOutDate, 'HH:mm');
+          pmOut = format(pmOutDate, 'h:mm');
           pickerPmOut = format(pmOutDate, 'HH:mm');
         }
       }
@@ -1174,26 +1174,26 @@ const DTR = () => {
       if (isAmShift) {
         amInDate = inDate;
         if (amInDate) {
-          amIn = format(amInDate, 'HH:mm');
+          amIn = format(amInDate, 'h:mm');
           pickerAmIn = format(amInDate, 'HH:mm');
         }
         if (singleLog.timeOut) {
           amOutDate = parseLocalDateNoShift(singleLog.timeOut);
           if (amOutDate) {
-            amOut = format(amOutDate, 'HH:mm');
+            amOut = format(amOutDate, 'h:mm');
             pickerAmOut = format(amOutDate, 'HH:mm');
           }
         }
       } else {
         pmInDate = inDate;
         if (pmInDate) {
-          pmIn = format(pmInDate, 'HH:mm');
+          pmIn = format(pmInDate, 'h:mm');
           pickerPmIn = format(pmInDate, 'HH:mm');
         }
         if (singleLog.timeOut) {
           pmOutDate = parseLocalDateNoShift(singleLog.timeOut);
           if (pmOutDate) {
-            pmOut = format(pmOutDate, 'HH:mm');
+            pmOut = format(pmOutDate, 'h:mm');
             pickerPmOut = format(pmOutDate, 'HH:mm');
           }
         }
@@ -1391,6 +1391,26 @@ const DTR = () => {
     };
   };
 
+  const getDayPunches = (dayLogs: DTRLog[], dateStrOverride?: string) => {
+    const res = getDayPunchesInner(dayLogs, dateStrOverride);
+    const activeDateStr = dateStrOverride || (dayLogs[0] ? dayLogs[0].date.split('T')[0] : null);
+    if (activeDateStr) {
+      const parts = activeDateStr.split('-');
+      if (parts.length === 3) {
+        const yr = Number(parts[0]);
+        const mn = Number(parts[1]);
+        const dy = Number(parts[2]);
+        const dateObj = new Date(yr, mn - 1, dy);
+        const dayOfWeek = dateObj.getDay();
+        if (dayOfWeek === 0 || dayOfWeek === 6) {
+          res.undertimeHours = '';
+          res.undertimeMin = '';
+        }
+      }
+    }
+    return res;
+  };
+
   const getScheduledHoursForDate = (dateStr: string) => {
     const parts = dateStr.split('-');
     if (parts.length !== 3) return 0;
@@ -1400,6 +1420,7 @@ const DTR = () => {
     const dateObj = new Date(yr, mn - 1, dy);
     const dayOfWeek = dateObj.getDay();
     const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    if (isWeekend) return 0;
     const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = daysOfWeekStr[dayOfWeek];
 

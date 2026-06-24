@@ -905,7 +905,7 @@ const DTRVisiting = () => {
     return Array.from({ length: totalDays }, (_, i) => i + 1);
   };
 
-  const getDayPunches = (dayLogs: DTRLog[], dateStrOverride?: string) => {
+  const getDayPunchesInner = (dayLogs: DTRLog[], dateStrOverride?: string) => {
     let amInVal = '---';
     let amOutVal = '---';
     let pmInVal = '---';
@@ -1081,6 +1081,26 @@ const DTRVisiting = () => {
     };
   };
 
+  const getDayPunches = (dayLogs: DTRLog[], dateStrOverride?: string) => {
+    const res = getDayPunchesInner(dayLogs, dateStrOverride);
+    const activeDateStr = dateStrOverride || (dayLogs[0] ? dayLogs[0].date.split('T')[0] : null);
+    if (activeDateStr) {
+      const parts = activeDateStr.split('-');
+      if (parts.length === 3) {
+        const yr = Number(parts[0]);
+        const mn = Number(parts[1]);
+        const dy = Number(parts[2]);
+        const dateObj = new Date(yr, mn - 1, dy);
+        const dayOfWeek = dateObj.getDay();
+        if (dayOfWeek === 0 || dayOfWeek === 6) {
+          res.undertimeHours = '';
+          res.undertimeMin = '';
+        }
+      }
+    }
+    return res;
+  };
+
   const getScheduledHoursForDate = (dateStr: string) => {
     const parts = dateStr.split('T')[0].split('-');
     if (parts.length !== 3) return 0;
@@ -1089,6 +1109,8 @@ const DTRVisiting = () => {
     const dy = Number(parts[2]);
     const dateObj = new Date(yr, mn - 1, dy);
     const dayOfWeek = dateObj.getDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+    if (isWeekend) return 0;
     const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = daysOfWeekStr[dayOfWeek];
 
@@ -1182,12 +1204,26 @@ const DTRVisiting = () => {
   const fullMonthRows = (() => {
     const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
     const rows: any[] = [];
+    const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     for (let day = 1; day <= 31; day++) {
       const dateStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const matchedHoliday = holidays.find((h: any) => h.date === dateStr);
       if (day <= daysInMonth) {
         const dateObj = new Date(selectedYear, selectedMonth - 1, day);
         const dayOfWeek = dateObj.getDay();
+        const dayName = daysOfWeekStr[dayOfWeek];
+        const daySchedules = employeeSchedules.filter((sch: any) => {
+          const dateVal = dateStr.split('T')[0];
+          if (sch.effectiveFrom && dateVal < sch.effectiveFrom.split('T')[0]) return false;
+          if (sch.effectiveTo && dateVal > sch.effectiveTo.split('T')[0]) return false;
+
+          if (sch.specificDate) {
+            const sDate = sch.specificDate.split('T')[0];
+            return sDate === dateStr;
+          }
+          return sch.dayOfWeek === dayName;
+        });
+
         const found = sheetEntries.find((e: any) => e.day === day);
         if (found) {
           rows.push({
@@ -1199,7 +1235,8 @@ const DTRVisiting = () => {
             undertimeHours: found.undertimeHours || '',
             undertimeMin: found.undertimeMin || '',
             holiday: matchedHoliday || null,
-            dayOfWeek
+            dayOfWeek,
+            schedules: daySchedules
           });
         } else {
           rows.push({
@@ -1211,7 +1248,8 @@ const DTRVisiting = () => {
             undertimeHours: '',
             undertimeMin: '',
             holiday: matchedHoliday || null,
-            dayOfWeek
+            dayOfWeek,
+            schedules: daySchedules
           });
         }
       } else {
@@ -1224,7 +1262,8 @@ const DTRVisiting = () => {
           undertimeHours: '',
           undertimeMin: '',
           holiday: null,
-          dayOfWeek: -1
+          dayOfWeek: -1,
+          schedules: []
         });
       }
     }
@@ -1362,13 +1401,21 @@ const DTRVisiting = () => {
                       onClick={() => handleOpenRowEdit(row.day)}
                       className={`border-b border-black hover:bg-neutral-50 transition-colors cursor-pointer print-cell-border ${row.holiday ? 'bg-rose-50/40 print:bg-rose-50/10' : isWeekend ? 'bg-amber-50/20 print:bg-neutral-50/5' : ''}`}
                     >
-                      <td className="border-r border-black font-extrabold py-0.5 w-8 bg-neutral-50/70 select-none text-[9.5px] print-cell-border text-center relative">
+                      <td className="border-r border-black font-extrabold py-0.5 w-8 bg-neutral-50/70 select-none text-[9.5px] print-cell-border text-center relative group">
                         {row.day}
                         {row.holiday && (
                           <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-rose-500 rounded-full print:border print:border-rose-500" title={row.holiday.name}></span>
                         )}
                         {isWeekend && !row.holiday && (
                           <span className="absolute bottom-0.5 right-0.5 w-1 h-1 bg-amber-500 rounded-full print:border print:border-amber-500" title={weekendLabel}></span>
+                        )}
+                        {row.schedules && row.schedules.length > 0 && (
+                          <span 
+                            className="absolute top-0.5 left-0.5 text-[8px] text-blue-600 font-sans leading-none no-print select-none cursor-help" 
+                            title={row.schedules.map((s: any) => `${formatTimeTo12Hour(s.startTime)} - ${formatTimeTo12Hour(s.endTime)}: ${s.subject} (${s.room || 'No Room'})`).join('\n')}
+                          >
+                            🎓
+                          </span>
                         )}
                       </td>
                       {row.holiday && !hasPunches ? (
