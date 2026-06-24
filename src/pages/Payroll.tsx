@@ -233,13 +233,13 @@ const Payroll = () => {
 
   const getCellValue = (entry: any, key: string) => {
     // 1. Resolve current active basic pay / wages (compSal2nd)
-    const resolvedWages = entry.customValues?.compSal2nd !== undefined 
-      ? Number(entry.customValues.compSal2nd)
-      : (entry.basicPay || 0);
+    const resolvedWages = Number(entry.customValues?.compSal2nd !== undefined 
+      ? entry.customValues.compSal2nd 
+      : (entry.basicPay || 0));
 
     // 2. If there is a manual override for this specific column, that always wins
     if (entry.customValues && entry.customValues[key] !== undefined) {
-      return entry.customValues[key];
+      return Number(entry.customValues[key]);
     }
 
     // 3. For the primary wages column:
@@ -273,17 +273,16 @@ const Payroll = () => {
 
     // 5. If it's cached in deductions, use that
     if (entry.deductions && entry.deductions[key] !== undefined) {
-      return entry.deductions[key];
+      return Number(entry.deductions[key]);
     }
 
     // 6. Dynamic Gross Pay calculation
     if (key === 'compGross') {
       const compPera = entry.customValues?.compPera !== undefined ? Number(entry.customValues.compPera) : 2000.00;
-      const absences = entry.customValues?.absences !== undefined ? Number(entry.customValues.absences) : 0.00;
       const otVal = Number(entry.overtime || 0);
       const allowVal = Number(entry.allowances || 0);
       const bonusVal = Number(entry.bonuses || 0);
-      return Number((resolvedWages + compPera + allowVal + otVal + bonusVal - absences).toFixed(2));
+      return Number((resolvedWages + compPera + allowVal + otVal + bonusVal).toFixed(2));
     }
 
     // 7. Static/Smart defaults
@@ -1346,7 +1345,7 @@ const Payroll = () => {
 
       section.entries.forEach(entry => {
         const totalDed = [
-          'absences', 'dedPolicyLoan', 'dedConsolLoan', 'dedMplLite', 'dedMpl', 'dedCpl', 'dedGfal', 
+          'dedPolicyLoan', 'dedConsolLoan', 'dedMplLite', 'dedMpl', 'dedCpl', 'dedGfal', 
           'dedEmergencyLoan', 'dedGsisPremPersonal', 'dedEducAsst', 'dedPagibigPersonal', 
           'dedPagibigMpl', 'dedSss', 'dedPagibigMp2', 'dedPhilhealthCont', 'dedCsbLoan', 'dedTaxWithheld'
         ].reduce((sum, key) => sum + getCellValue(entry, key), 0);
