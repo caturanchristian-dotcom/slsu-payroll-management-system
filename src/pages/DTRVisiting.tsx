@@ -14,7 +14,11 @@ import {
   Calendar,
   User,
   ShieldAlert,
-  Edit2
+  Edit2,
+  Pencil,
+  BookOpen,
+  MapPin,
+  Info
 } from 'lucide-react';
 import { 
   Dialog,
@@ -203,6 +207,154 @@ const DTRVisiting = () => {
   };
 
   const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1); // 1-12
+  
+  // Schedule Management States
+  const [isAddScheduleOpen, setIsAddScheduleOpen] = useState(false);
+  const [isEditScheduleOpen, setIsEditScheduleOpen] = useState(false);
+  const [newSchedule, setNewSchedule] = useState({
+    dayOfWeek: 'Monday',
+    startTime: '08:00',
+    endTime: '11:00',
+    subject: '',
+    room: '',
+    scheduleType: 'recurring', // 'recurring' | 'specific'
+    specificDate: format(new Date(), 'yyyy-MM-dd'),
+    effectiveFrom: '',
+    effectiveTo: ''
+  });
+  const [editSchedule, setEditSchedule] = useState({
+    id: '',
+    dayOfWeek: 'Monday',
+    startTime: '08:00',
+    endTime: '11:00',
+    subject: '',
+    room: '',
+    scheduleType: 'recurring', // 'recurring' | 'specific'
+    specificDate: '',
+    effectiveFrom: '',
+    effectiveTo: ''
+  });
+
+  const handleCreateSchedule = async () => {
+    if (!newSchedule.subject || !newSchedule.startTime || !newSchedule.endTime) {
+      toast.error("Subject and times are required.");
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/schedules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          dayOfWeek: newSchedule.scheduleType === 'recurring' ? newSchedule.dayOfWeek : '',
+          startTime: newSchedule.startTime,
+          endTime: newSchedule.endTime,
+          subject: newSchedule.subject,
+          room: newSchedule.room || '',
+          specificDate: newSchedule.scheduleType === 'specific' ? newSchedule.specificDate : '',
+          effectiveFrom: newSchedule.scheduleType === 'recurring' && newSchedule.effectiveFrom ? newSchedule.effectiveFrom : null,
+          effectiveTo: newSchedule.scheduleType === 'recurring' && newSchedule.effectiveTo ? newSchedule.effectiveTo : null
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        toast.success("Schedule created successfully!");
+        setIsAddScheduleOpen(false);
+        setNewSchedule({
+          dayOfWeek: 'Monday',
+          startTime: '08:00',
+          endTime: '11:00',
+          subject: '',
+          room: '',
+          scheduleType: 'recurring',
+          specificDate: format(new Date(), 'yyyy-MM-dd'),
+          effectiveFrom: '',
+          effectiveTo: ''
+        });
+        fetchSchedulesForEmployee(selectedEmployeeId);
+        fetchLogs();
+      } else {
+        toast.error(data.message || "Failed to create schedule.");
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error("Network error creating schedule.");
+    }
+  };
+
+  const handleUpdateSchedule = async () => {
+    if (!editSchedule.subject || !editSchedule.startTime || !editSchedule.endTime) {
+      toast.error("Subject and times are required.");
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/schedules/${editSchedule.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          dayOfWeek: editSchedule.scheduleType === 'recurring' ? editSchedule.dayOfWeek : '',
+          startTime: editSchedule.startTime,
+          endTime: editSchedule.endTime,
+          subject: editSchedule.subject,
+          room: editSchedule.room || '',
+          specificDate: editSchedule.scheduleType === 'specific' ? editSchedule.specificDate : '',
+          effectiveFrom: editSchedule.scheduleType === 'recurring' && editSchedule.effectiveFrom ? editSchedule.effectiveFrom : null,
+          effectiveTo: editSchedule.scheduleType === 'recurring' && editSchedule.effectiveTo ? editSchedule.effectiveTo : null
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        toast.success("Schedule updated successfully!");
+        setIsEditScheduleOpen(false);
+        fetchSchedulesForEmployee(selectedEmployeeId);
+        fetchLogs();
+      } else {
+        toast.error(data.message || "Failed to update schedule.");
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error("Network error updating schedule.");
+    }
+  };
+
+  const handleDeleteSchedule = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this schedule?")) return;
+    try {
+      const response = await fetch(`/api/schedules/${id}`, {
+        method: 'DELETE'
+      });
+      const data = await response.json();
+      if (data.success) {
+        toast.success("Schedule deleted successfully!");
+        fetchSchedulesForEmployee(selectedEmployeeId);
+        fetchLogs();
+      } else {
+        toast.error(data.message || "Failed to delete schedule.");
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error("Network error deleting schedule.");
+    }
+  };
+
+  const handleOpenEditSchedule = (sch: any) => {
+    setEditSchedule({
+      id: sch.id,
+      dayOfWeek: sch.dayOfWeek || 'Monday',
+      startTime: sch.startTime || '08:00',
+      endTime: sch.endTime || '11:00',
+      subject: sch.subject || '',
+      room: sch.room || '',
+      scheduleType: sch.specificDate ? 'specific' : 'recurring',
+      specificDate: sch.specificDate ? sch.specificDate.split('T')[0] : '',
+      effectiveFrom: sch.effectiveFrom ? sch.effectiveFrom.split('T')[0] : '',
+      effectiveTo: sch.effectiveTo ? sch.effectiveTo.split('T')[0] : ''
+    });
+    setIsEditScheduleOpen(true);
+  };
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
   const [currentStatus, setCurrentStatus] = useState<DTRLog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -788,13 +940,13 @@ const DTRVisiting = () => {
       const primaryAM = sorted[0];
       amInDate = parseLocalDateNoShift(primaryAM.timeIn);
       if (amInDate) {
-        amInVal = format(amInDate, 'HH:mm');
+        amInVal = format(amInDate, 'h:mm');
         pickerAmInVal = format(amInDate, 'HH:mm');
       }
       if (primaryAM.timeOut) {
         amOutDate = parseLocalDateNoShift(primaryAM.timeOut);
         if (amOutDate) {
-          amOutVal = format(amOutDate, 'HH:mm');
+          amOutVal = format(amOutDate, 'h:mm');
           pickerAmOutVal = format(amOutDate, 'HH:mm');
         }
       }
@@ -802,13 +954,13 @@ const DTRVisiting = () => {
       const primaryPM = sorted[1];
       pmInDate = parseLocalDateNoShift(primaryPM.timeIn);
       if (pmInDate) {
-        pmInVal = format(pmInDate, 'HH:mm');
+        pmInVal = format(pmInDate, 'h:mm');
         pickerPmInVal = format(pmInDate, 'HH:mm');
       }
       if (primaryPM.timeOut) {
         pmOutDate = parseLocalDateNoShift(primaryPM.timeOut);
         if (pmOutDate) {
-          pmOutVal = format(pmOutDate, 'HH:mm');
+          pmOutVal = format(pmOutDate, 'h:mm');
           pickerPmOutVal = format(pmOutDate, 'HH:mm');
         }
       }
@@ -824,26 +976,26 @@ const DTRVisiting = () => {
       if (isAmShift) {
         amInDate = inDate;
         if (amInDate) {
-          amInVal = format(amInDate, 'HH:mm');
+          amInVal = format(amInDate, 'h:mm');
           pickerAmInVal = format(amInDate, 'HH:mm');
         }
         if (singleLog.timeOut) {
           amOutDate = parseLocalDateNoShift(singleLog.timeOut);
           if (amOutDate) {
-            amOutVal = format(amOutDate, 'HH:mm');
+            amOutVal = format(amOutDate, 'h:mm');
             pickerAmOutVal = format(amOutDate, 'HH:mm');
           }
         }
       } else {
         pmInDate = inDate;
         if (pmInDate) {
-          pmInVal = format(pmInDate, 'HH:mm');
+          pmInVal = format(pmInDate, 'h:mm');
           pickerPmInVal = format(pmInDate, 'HH:mm');
         }
         if (singleLog.timeOut) {
           pmOutDate = parseLocalDateNoShift(singleLog.timeOut);
           if (pmOutDate) {
-            pmOutVal = format(pmOutDate, 'HH:mm');
+            pmOutVal = format(pmOutDate, 'h:mm');
             pickerPmOutVal = format(pmOutDate, 'HH:mm');
           }
         }
@@ -1533,6 +1685,217 @@ const DTRVisiting = () => {
           </div>
         </Card>
       </div>
+
+      {/* Employee Schedule Manager (No-Print) */}
+      <Card className="border border-neutral-200 shadow-md rounded-3xl p-6 bg-white no-print">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-neutral-100 pb-4 mb-5">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2.5 bg-blue-50 text-blue-700 rounded-2xl">
+              <Calendar className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-bold font-sans text-neutral-800 leading-none">Approved Teaching Schedules</h3>
+                <span className="inline-flex items-center justify-center px-2 py-0.5 text-xs font-semibold font-mono bg-blue-50 text-blue-700 border border-blue-100 rounded-lg">
+                  {employeeSchedules.length} {employeeSchedules.length === 1 ? 'class' : 'classes'}
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400 font-sans mt-1.5">
+                Manage the schedule blocks that are used to cross-reference and validate class logs for {(() => {
+                  const emp = employees.find(e => e.id === selectedEmployeeId);
+                  return emp ? `${emp.firstName} ${emp.lastName}` : "selected instructor";
+                })()}.
+              </p>
+            </div>
+          </div>
+
+          {isAdmin && selectedEmployeeId && (
+            <Button
+              onClick={() => setIsAddScheduleOpen(true)}
+              className="bg-blue-600 hover:bg-blue-700 text-white rounded-xl gap-1.5 font-sans text-xs h-10 px-4 shadow-sm self-start sm:self-center"
+            >
+              <Plus className="w-4 h-4" />
+              Add Teaching Schedule
+            </Button>
+          )}
+        </div>
+
+        {employeeSchedules.length === 0 ? (
+          <div className="text-center py-10 bg-neutral-50/50 border border-dashed border-neutral-200 rounded-2xl flex flex-col items-center justify-center p-6">
+            <Calendar className="w-10 h-10 text-neutral-300 stroke-[1.5] mb-3" />
+            <h4 className="text-sm font-semibold text-neutral-700">No Approved Schedules Found</h4>
+            <p className="text-xs text-neutral-400 max-w-md mt-1 text-center">
+              There are no class timetables registered for this instructor. Add recurring weekly lectures or single-day sessions to automatically calculate their timesheet hours.
+            </p>
+            {isAdmin && selectedEmployeeId && (
+              <Button
+                variant="outline"
+                onClick={() => setIsAddScheduleOpen(true)}
+                className="mt-4 border-blue-200 text-blue-600 hover:bg-blue-50 rounded-xl font-sans text-xs"
+              >
+                Create First Schedule
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Weekly Recurring Column */}
+            <div className="lg:col-span-8 space-y-4">
+              <h4 className="text-xs font-bold font-sans text-neutral-500 uppercase tracking-wider flex items-center gap-1.5 border-b border-neutral-100 pb-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                Weekly Recurring Lecture Blocks
+              </h4>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map(day => {
+                  const dayClasses = employeeSchedules.filter(sch => sch.dayOfWeek === day && !sch.specificDate);
+                  if (dayClasses.length === 0) return null;
+
+                  return (
+                    <div key={day} className="border border-neutral-100 rounded-2xl p-4 bg-neutral-50/40 hover:bg-neutral-50/80 transition-colors">
+                      <div className="flex items-center justify-between mb-2 border-b border-neutral-100/60 pb-1.5">
+                        <span className="text-xs font-extrabold text-neutral-700 font-sans tracking-wide uppercase">{day}</span>
+                        <span className="inline-flex items-center justify-center px-1.5 py-0.5 text-[10px] font-mono leading-none bg-neutral-100 text-neutral-600 border border-neutral-200/50 rounded-md">
+                          {dayClasses.length} {dayClasses.length === 1 ? 'Class' : 'Classes'}
+                        </span>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {dayClasses.map(sch => (
+                          <div key={sch.id} className="bg-white border border-neutral-200/60 p-3 rounded-xl shadow-sm text-xs space-y-2 relative group hover:border-blue-200 hover:shadow-md transition-all">
+                            <div className="flex justify-between items-start gap-4">
+                              <div className="min-w-0 flex-1 text-left">
+                                <p className="font-bold text-neutral-800 font-sans truncate leading-tight">{sch.subject}</p>
+                                <div className="flex items-center gap-1.5 mt-1.5 text-neutral-500 font-mono text-[11px] leading-none">
+                                  <Clock className="w-3 h-3 text-neutral-400 shrink-0" />
+                                  <span>{formatTimeTo12Hour(sch.startTime)} - {formatTimeTo12Hour(sch.endTime)}</span>
+                                </div>
+                                {sch.room && (
+                                  <div className="flex items-center gap-1.5 mt-1.5 text-neutral-500 font-sans text-[11px] leading-none">
+                                    <MapPin className="w-3 h-3 text-neutral-400 shrink-0" />
+                                    <span>{sch.room}</span>
+                                  </div>
+                                )}
+                                {(sch.effectiveFrom || sch.effectiveTo) && (
+                                  <div className="mt-2 text-[10px] bg-neutral-50 text-neutral-500 rounded px-1.5 py-0.5 inline-block font-sans">
+                                    📅 Active: {sch.effectiveFrom ? format(new Date(sch.effectiveFrom), 'MMM d, yyyy') : 'Start'} to {sch.effectiveTo ? format(new Date(sch.effectiveTo), 'MMM d, yyyy') : 'End'}
+                                  </div>
+                                )}
+                              </div>
+
+                              {isAdmin && (
+                                <div className="flex items-center gap-1 shrink-0 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
+                                  <Button
+                                    onClick={() => handleOpenEditSchedule(sch)}
+                                    variant="ghost"
+                                    size="icon"
+                                    className="w-7 h-7 text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 rounded-lg"
+                                    title="Edit class"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </Button>
+                                  <Button
+                                    onClick={() => handleDeleteSchedule(sch.id)}
+                                    variant="ghost"
+                                    size="icon"
+                                    className="w-7 h-7 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg"
+                                    title="Delete class"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                {/* Fallback if only specific date schedules exist */}
+                {employeeSchedules.filter(sch => !sch.specificDate).length === 0 && (
+                  <div className="col-span-2 text-center py-6 border border-dashed border-neutral-100 rounded-2xl bg-neutral-50/10">
+                    <p className="text-xs text-neutral-400 font-semibold italic">No weekly recurring lectures scheduled.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Date-Specific Column */}
+            <div className="lg:col-span-4 space-y-4 border-t lg:border-t-0 lg:border-l lg:border-neutral-100 pt-4 lg:pt-0 lg:pl-6">
+              <h4 className="text-xs font-bold font-sans text-neutral-500 uppercase tracking-wider flex items-center gap-1.5 border-b border-neutral-100 pb-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                Date-Specific Class Adjustments
+              </h4>
+
+              <div className="space-y-3 max-h-[360px] overflow-y-auto pr-1">
+                {(() => {
+                  const specificClasses = employeeSchedules.filter(sch => sch.specificDate);
+                  if (specificClasses.length === 0) {
+                    return (
+                      <div className="text-center py-10 border border-dashed border-neutral-100 rounded-2xl bg-neutral-50/20">
+                        <Calendar className="w-8 h-8 text-neutral-300 stroke-[1.5] mx-auto mb-2" />
+                        <h5 className="text-xs font-bold text-neutral-600">No Special Class Overrides</h5>
+                        <p className="text-[10px] text-neutral-400 max-w-[200px] mx-auto mt-1">
+                          No single-day class targets exist. Use overrides to schedule make-up lectures or special exam periods.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return specificClasses.map(sch => (
+                    <div key={sch.id} className="bg-white border border-neutral-150 p-3 rounded-xl shadow-sm text-xs space-y-1.5 relative group hover:border-amber-200 hover:shadow-md transition-all">
+                      <div className="flex justify-between items-start gap-3">
+                        <div className="min-w-0 flex-1 text-left">
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <span className="px-1.5 py-0.5 text-[9px] font-extrabold uppercase bg-amber-100 text-amber-800 rounded">
+                              {format(new Date(sch.specificDate), 'MMM d, yyyy')}
+                            </span>
+                          </div>
+                          <p className="font-bold text-neutral-800 font-sans truncate leading-tight">{sch.subject}</p>
+                          <div className="flex items-center gap-1.5 mt-1.5 text-neutral-500 font-mono text-[11px] leading-none">
+                            <Clock className="w-3 h-3 text-neutral-400 shrink-0" />
+                            <span>{formatTimeTo12Hour(sch.startTime)} - {formatTimeTo12Hour(sch.endTime)}</span>
+                          </div>
+                          {sch.room && (
+                            <div className="flex items-center gap-1.5 mt-1.5 text-neutral-500 font-sans text-[11px] leading-none">
+                              <MapPin className="w-3 h-3 text-neutral-400 shrink-0" />
+                              <span>{sch.room}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {isAdmin && (
+                          <div className="flex items-center gap-1 shrink-0 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
+                            <Button
+                              onClick={() => handleOpenEditSchedule(sch)}
+                              variant="ghost"
+                              size="icon"
+                              className="w-7 h-7 text-neutral-500 hover:text-neutral-800 hover:bg-neutral-100 rounded-lg"
+                              title="Edit override"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button
+                              onClick={() => handleDeleteSchedule(sch.id)}
+                              variant="ghost"
+                              size="icon"
+                              className="w-7 h-7 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg"
+                              title="Delete override"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
 
       {/* Sandbox & Testing Suite Panel (No-Print) */}
       <Card className="border border-neutral-100 shadow-xl shadow-neutral-205/40 rounded-3xl p-6 bg-white no-print">
@@ -2224,6 +2587,274 @@ const DTRVisiting = () => {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL 3: Add Teaching Schedule Dialog */}
+      <Dialog open={isAddScheduleOpen} onOpenChange={setIsAddScheduleOpen}>
+        <DialogContent className="sm:max-w-[450px] rounded-3xl no-print text-left">
+          <DialogHeader>
+            <DialogTitle className="font-bold font-sans flex items-center gap-2">
+              <Plus className="w-5 h-5 text-blue-600" />
+              <span>Add Approved Teaching Schedule</span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-3 font-sans">
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-neutral-600">Schedule Type</Label>
+              <select
+                value={newSchedule.scheduleType}
+                onChange={(e) => setNewSchedule({...newSchedule, scheduleType: e.target.value})}
+                className="w-full h-11 border border-neutral-200 rounded-xl bg-neutral-50/50 px-3 text-xs text-neutral-800 font-medium focus:ring-2 focus:ring-neutral-200 focus:outline-none"
+              >
+                <option value="recurring">Weekly Recurring Lecture Block</option>
+                <option value="specific">Date-Specific Class Adjustment</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="sched-subject" className="text-xs font-semibold text-neutral-600">Subject Name / Course Code</Label>
+              <Input
+                id="sched-subject"
+                placeholder="e.g. Web Programming Lecture (IT-311)"
+                value={newSchedule.subject}
+                onChange={(e) => setNewSchedule({...newSchedule, subject: e.target.value})}
+                className="rounded-xl h-11 text-xs"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="sched-room" className="text-xs font-semibold text-neutral-600">Room / Location</Label>
+              <Input
+                id="sched-room"
+                placeholder="e.g. Lab 2, Main Building"
+                value={newSchedule.room}
+                onChange={(e) => setNewSchedule({...newSchedule, room: e.target.value})}
+                className="rounded-xl h-11 text-xs"
+              />
+            </div>
+
+            {newSchedule.scheduleType === 'recurring' ? (
+              <div className="space-y-1">
+                <Label className="text-xs font-semibold text-neutral-600">Day of the Week</Label>
+                <select
+                  value={newSchedule.dayOfWeek}
+                  onChange={(e) => setNewSchedule({...newSchedule, dayOfWeek: e.target.value})}
+                  className="w-full h-11 border border-neutral-200 rounded-xl bg-neutral-50/50 px-3 text-xs text-neutral-800 font-medium focus:ring-2 focus:ring-neutral-200 focus:outline-none"
+                >
+                  <option value="Monday">Monday</option>
+                  <option value="Tuesday">Tuesday</option>
+                  <option value="Wednesday">Wednesday</option>
+                  <option value="Thursday">Thursday</option>
+                  <option value="Friday">Friday</option>
+                  <option value="Saturday">Saturday</option>
+                  <option value="Sunday">Sunday</option>
+                </select>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <Label htmlFor="sched-date" className="text-xs font-semibold text-neutral-600">Specific Date Target</Label>
+                <Input
+                  id="sched-date"
+                  type="date"
+                  value={newSchedule.specificDate}
+                  onChange={(e) => setNewSchedule({...newSchedule, specificDate: e.target.value})}
+                  className="rounded-xl h-11 text-xs"
+                />
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="sched-start" className="text-xs font-semibold text-neutral-600">Start Time</Label>
+                <Input
+                  id="sched-start"
+                  type="time"
+                  value={newSchedule.startTime}
+                  onChange={(e) => setNewSchedule({...newSchedule, startTime: autoPmTime(e.target.value)})}
+                  className="rounded-xl h-11 text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="sched-end" className="text-xs font-semibold text-neutral-600">End Time</Label>
+                <Input
+                  id="sched-end"
+                  type="time"
+                  value={newSchedule.endTime}
+                  onChange={(e) => setNewSchedule({...newSchedule, endTime: autoPmTime(e.target.value)})}
+                  className="rounded-xl h-11 text-xs"
+                />
+              </div>
+            </div>
+
+            {newSchedule.scheduleType === 'recurring' && (
+              <div className="grid grid-cols-2 gap-4 border-t border-neutral-100 pt-3 mt-2">
+                <div className="space-y-1">
+                  <Label htmlFor="sched-from" className="text-xs font-semibold text-neutral-600">Effective From (Optional)</Label>
+                  <Input
+                    id="sched-from"
+                    type="date"
+                    value={newSchedule.effectiveFrom}
+                    onChange={(e) => setNewSchedule({...newSchedule, effectiveFrom: e.target.value})}
+                    className="rounded-xl h-11 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="sched-to" className="text-xs font-semibold text-neutral-600">Effective To (Optional)</Label>
+                  <Input
+                    id="sched-to"
+                    type="date"
+                    value={newSchedule.effectiveTo}
+                    onChange={(e) => setNewSchedule({...newSchedule, effectiveTo: e.target.value})}
+                    className="rounded-xl h-11 text-xs"
+                  />
+                </div>
+              </div>
+            )}
+
+            <DialogFooter className="pt-4 no-print">
+              <Button type="button" variant="ghost" onClick={() => setIsAddScheduleOpen(false)} className="rounded-xl">
+                Discard
+              </Button>
+              <Button onClick={handleCreateSchedule} className="bg-blue-600 hover:bg-blue-700 text-white rounded-xl">
+                Create Schedule
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL 4: Edit Teaching Schedule Dialog */}
+      <Dialog open={isEditScheduleOpen} onOpenChange={setIsEditScheduleOpen}>
+        <DialogContent className="sm:max-w-[450px] rounded-3xl no-print text-left">
+          <DialogHeader>
+            <DialogTitle className="font-bold font-sans flex items-center gap-2">
+              <Pencil className="w-5 h-5 text-blue-600" />
+              <span>Edit Teaching Schedule</span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-3 font-sans">
+            <div className="space-y-1">
+              <Label className="text-xs font-semibold text-neutral-600">Schedule Type</Label>
+              <select
+                value={editSchedule.scheduleType}
+                onChange={(e) => setEditSchedule({...editSchedule, scheduleType: e.target.value})}
+                className="w-full h-11 border border-neutral-200 rounded-xl bg-neutral-50/50 px-3 text-xs text-neutral-800 font-medium focus:ring-2 focus:ring-neutral-200 focus:outline-none"
+              >
+                <option value="recurring">Weekly Recurring Lecture Block</option>
+                <option value="specific">Date-Specific Class Adjustment</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="edit-sched-subject" className="text-xs font-semibold text-neutral-600">Subject Name / Course Code</Label>
+              <Input
+                id="edit-sched-subject"
+                placeholder="e.g. Web Programming Lecture (IT-311)"
+                value={editSchedule.subject}
+                onChange={(e) => setEditSchedule({...editSchedule, subject: e.target.value})}
+                className="rounded-xl h-11 text-xs"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="edit-sched-room" className="text-xs font-semibold text-neutral-600">Room / Location</Label>
+              <Input
+                id="edit-sched-room"
+                placeholder="e.g. Lab 2, Main Building"
+                value={editSchedule.room}
+                onChange={(e) => setEditSchedule({...editSchedule, room: e.target.value})}
+                className="rounded-xl h-11 text-xs"
+              />
+            </div>
+
+            {editSchedule.scheduleType === 'recurring' ? (
+              <div className="space-y-1">
+                <Label className="text-xs font-semibold text-neutral-600">Day of the Week</Label>
+                <select
+                  value={editSchedule.dayOfWeek}
+                  onChange={(e) => setEditSchedule({...editSchedule, dayOfWeek: e.target.value})}
+                  className="w-full h-11 border border-neutral-200 rounded-xl bg-neutral-50/50 px-3 text-xs text-neutral-800 font-medium focus:ring-2 focus:ring-neutral-200 focus:outline-none"
+                >
+                  <option value="Monday">Monday</option>
+                  <option value="Tuesday">Tuesday</option>
+                  <option value="Wednesday">Wednesday</option>
+                  <option value="Thursday">Thursday</option>
+                  <option value="Friday">Friday</option>
+                  <option value="Saturday">Saturday</option>
+                  <option value="Sunday">Sunday</option>
+                </select>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <Label htmlFor="edit-sched-date" className="text-xs font-semibold text-neutral-600">Specific Date Target</Label>
+                <Input
+                  id="edit-sched-date"
+                  type="date"
+                  value={editSchedule.specificDate}
+                  onChange={(e) => setEditSchedule({...editSchedule, specificDate: e.target.value})}
+                  className="rounded-xl h-11 text-xs"
+                />
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="edit-sched-start" className="text-xs font-semibold text-neutral-600">Start Time</Label>
+                <Input
+                  id="edit-sched-start"
+                  type="time"
+                  value={editSchedule.startTime}
+                  onChange={(e) => setEditSchedule({...editSchedule, startTime: autoPmTime(e.target.value)})}
+                  className="rounded-xl h-11 text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="edit-sched-end" className="text-xs font-semibold text-neutral-600">End Time</Label>
+                <Input
+                  id="edit-sched-end"
+                  type="time"
+                  value={editSchedule.endTime}
+                  onChange={(e) => setEditSchedule({...editSchedule, endTime: autoPmTime(e.target.value)})}
+                  className="rounded-xl h-11 text-xs"
+                />
+              </div>
+            </div>
+
+            {editSchedule.scheduleType === 'recurring' && (
+              <div className="grid grid-cols-2 gap-4 border-t border-neutral-100 pt-3 mt-2">
+                <div className="space-y-1">
+                  <Label htmlFor="edit-sched-from" className="text-xs font-semibold text-neutral-600">Effective From (Optional)</Label>
+                  <Input
+                    id="edit-sched-from"
+                    type="date"
+                    value={editSchedule.effectiveFrom}
+                    onChange={(e) => setEditSchedule({...editSchedule, effectiveFrom: e.target.value})}
+                    className="rounded-xl h-11 text-xs"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="edit-sched-to" className="text-xs font-semibold text-neutral-600">Effective To (Optional)</Label>
+                  <Input
+                    id="edit-sched-to"
+                    type="date"
+                    value={editSchedule.effectiveTo}
+                    onChange={(e) => setEditSchedule({...editSchedule, effectiveTo: e.target.value})}
+                    className="rounded-xl h-11 text-xs"
+                  />
+                </div>
+              </div>
+            )}
+
+            <DialogFooter className="pt-4 no-print">
+              <Button type="button" variant="ghost" onClick={() => setIsEditScheduleOpen(false)} className="rounded-xl">
+                Discard
+              </Button>
+              <Button onClick={handleUpdateSchedule} className="bg-blue-600 text-white hover:bg-blue-700 rounded-xl">
+                Save Changes
+              </Button>
+            </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
     </div>
