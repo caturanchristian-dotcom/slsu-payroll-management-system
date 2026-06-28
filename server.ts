@@ -868,730 +868,803 @@ async function startServer() {
           AND cycleId IN (SELECT id FROM payroll_cycles WHERE status = 'draft')
       `).all(employeeId) as { cycleId: string }[];
       for (const entry of draftEntries) {
-        await recalculateCycle(entry.cycleId);
+        await recalculateCycle(entry.cycleId, employeeId);
       }
     } catch (err) {
       console.error("Auto-recalc payroll failed:", err);
     }
   };
 
-  const recalculateCycle = async (cycleId: string) => {
+  const recalculateCycle = db.transaction(async (cycleId: string, onlyEmployeeId?: string) => {
     try {
       const cycle = await db.prepare("SELECT * FROM payroll_cycles WHERE id = ?").get(cycleId) as any;
-        if (!cycle) return;
-        const entries = await db.prepare("SELECT * FROM payroll_entries WHERE cycleId = ?").all(cycleId) as any;
-        let totalGross = 0, totalDeductions = 0, totalNet = 0;
+      if (!cycle) return;
 
-        for (const entry of entries) {
-          const emp = await db.prepare("SELECT * FROM employees WHERE id = ?").get(entry.employeeId) as any;
-          
-          // Get manual overrides/custom properties
-          const custom = entry.custom_values_json ? JSON.parse(entry.custom_values_json) : {};
-          
-          let computedBasicPay = Number(entry.basicPay);
-          let dynamicAbsences = 0.00;
-          let baseCyclePay = 0.00;
-          let undertimeDeduction = 0.00;
+      let entriesQuery = "SELECT * FROM payroll_entries WHERE cycleId = ?";
+      const entriesParams: any[] = [cycleId];
+      if (onlyEmployeeId) {
+        entriesQuery += " AND employeeId = ?";
+        entriesParams.push(onlyEmployeeId);
+      }
 
-          if (emp) {
-            emp.basicSalary = Number(emp.basicSalary || 0);
-            if (emp.category === 'Job Order') {
-              // Paid per day or per hour. Look up DTR logs within cycle period
-              const dtrLogs = await db.prepare("SELECT * FROM dtr_logs WHERE employeeId = ? AND date >= ? AND date <= ?").all(emp.id, cycle.startDate, cycle.endDate) as any;
-              if (dtrLogs.length > 0) {
-                if (emp.salaryType === 'hourly') {
-                  let totalHours = 0;
-                  for (const log of dtrLogs) {
-                    if (log.timeIn && log.timeOut) {
-                      const inDate = new Date(log.timeIn);
-                      const outDate = new Date(log.timeOut);
-                      const diffMs = outDate.getTime() - inDate.getTime();
-                      let hours = Math.max(0, diffMs / (1000 * 60 * 60));
-                      
-                      const inLocalMinutes = inDate.getHours() * 60 + inDate.getMinutes();
-                      const outLocalMinutes = outDate.getHours() * 60 + outDate.getMinutes();
-                      if (inLocalMinutes < 12 * 60 && outLocalMinutes > 13 * 60) {
-                        hours = Math.max(0, hours - 1);
-                      }
-                      
-                      totalHours += hours;
-                    }
-                  }
-                  computedBasicPay = Number((totalHours * emp.basicSalary).toFixed(2));
-                } else {
-                  // Clean daily rate: Count unique dates on which the employee had a clock-in record
-                  const uniqueDates = new Set(dtrLogs.filter((log: any) => log.timeIn).map((log: any) => {
-                    const dVal = log.date;
-                    if (!dVal) return '';
-                    if (dVal instanceof Date) {
-                      try { return dVal.toISOString().split('T')[0]; } catch (e) { return ''; }
-                    }
-                    return String(dVal).split('T')[0];
-                  }));
-                  const totalDays = uniqueDates.size;
-                  computedBasicPay = Number((totalDays * emp.basicSalary).toFixed(2));
-                }
-              } else {
-                // Fallback graceful values: Hourly -> 80 hours, Daily -> 10 days
-                const multiplier = emp.salaryType === 'hourly' ? 80 : 10;
-                computedBasicPay = Number((multiplier * emp.basicSalary).toFixed(2));
-              }
-            } else if (emp.category === 'Visiting Instructor') {
-              // Paid per unit or teaching hour. Look up DTR logs within the cycle period
-              const dtrLogs = await db.prepare("SELECT * FROM dtr_logs WHERE employeeId = ? AND date >= ? AND date <= ?").all(emp.id, cycle.startDate, cycle.endDate) as any;
-              let tHours = 0;
+      const entries = await db.prepare(entriesQuery).all(...entriesParams) as any;
+      let totalGross = 0, totalDeductions = 0, totalNet = 0;
 
-              if (dtrLogs.length > 0) {
-                // Fetch the instructor's schedules
-                const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(emp.id) as any;
-                
-                // Group dtrLogs by date
-                const logsByDate: { [date: string]: any[] } = {};
+      const formatToYYYYMMDD = (dVal: any): string => {
+        if (!dVal) return '';
+        if (dVal instanceof Date) {
+          const yr = dVal.getFullYear();
+          const mo = String(dVal.getMonth() + 1).padStart(2, '0');
+          const dy = String(dVal.getDate()).padStart(2, '0');
+          return `${yr}-${mo}-${dy}`;
+        }
+        return String(dVal).split('T')[0];
+      };
+
+      const startDateStr = formatToYYYYMMDD(cycle.startDate);
+      const endDateStr = formatToYYYYMMDD(cycle.endDate);
+
+      // --- HIGH-PERFORMANCE PRE-FETCHING OUTSIDE THE LOOP ---
+      // Fetch all holidays once
+      const holidayRows = await db.prepare("SELECT date FROM holidays").all() as any[];
+      const holidayDates = new Set(holidayRows.map(h => h.date ? String(h.date).split('T')[0] : ''));
+
+      // Fetch employees for this batch
+      let employeesRows: any[] = [];
+      if (onlyEmployeeId) {
+        employeesRows = await db.prepare("SELECT * FROM employees WHERE id = ?").all(onlyEmployeeId) as any[];
+      } else {
+        employeesRows = await db.prepare("SELECT * FROM employees").all() as any[];
+      }
+      const employeesMap = new Map(employeesRows.map((e: any) => [e.id, e]));
+
+      // Fetch schedules for this batch
+      let schedulesRows: any[] = [];
+      if (onlyEmployeeId) {
+        schedulesRows = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(onlyEmployeeId) as any[];
+      } else {
+        schedulesRows = await db.prepare("SELECT * FROM schedules").all() as any[];
+      }
+      const schedulesByEmployee: { [empId: string]: any[] } = {};
+      for (const s of schedulesRows) {
+        if (!schedulesByEmployee[s.employeeId]) {
+          schedulesByEmployee[s.employeeId] = [];
+        }
+        schedulesByEmployee[s.employeeId].push(s);
+      }
+
+      // Fetch deductions for this batch
+      let activeDedsRows: any[] = [];
+      if (onlyEmployeeId) {
+        activeDedsRows = await db.prepare("SELECT employeeId, type, amount FROM deductions WHERE employeeId = ?").all(onlyEmployeeId) as any[];
+      } else {
+        activeDedsRows = await db.prepare("SELECT employeeId, type, amount FROM deductions").all() as any[];
+      }
+      const dedsByEmployee: { [empId: string]: any[] } = {};
+      for (const d of activeDedsRows) {
+        if (!dedsByEmployee[d.employeeId]) {
+          dedsByEmployee[d.employeeId] = [];
+        }
+        dedsByEmployee[d.employeeId].push(d);
+      }
+
+      // Fetch DTR logs in the date range for this batch
+      let dtrLogsRows: any[] = [];
+      if (onlyEmployeeId) {
+        dtrLogsRows = await db.prepare("SELECT * FROM dtr_logs WHERE employeeId = ? AND date >= ? AND date <= ?").all(onlyEmployeeId, startDateStr, endDateStr) as any[];
+      } else {
+        dtrLogsRows = await db.prepare("SELECT * FROM dtr_logs WHERE date >= ? AND date <= ?").all(startDateStr, endDateStr) as any[];
+      }
+      const dtrLogsByEmployee: { [empId: string]: any[] } = {};
+      for (const log of dtrLogsRows) {
+        const empId = log.employeeId;
+        if (!dtrLogsByEmployee[empId]) {
+          dtrLogsByEmployee[empId] = [];
+        }
+        dtrLogsByEmployee[empId].push(log);
+      }
+
+      for (const entry of entries) {
+        const emp = employeesMap.get(entry.employeeId);
+        
+        // Get manual overrides/custom properties
+        const custom = entry.custom_values_json ? JSON.parse(entry.custom_values_json) : {};
+        
+        let computedBasicPay = Number(entry.basicPay);
+        let dynamicAbsences = 0.00;
+        let baseCyclePay = 0.00;
+        let undertimeDeduction = 0.00;
+        let teachingHoursToUpdate = entry.teachingHours || 0.00;
+
+        if (emp) {
+          emp.basicSalary = Number(emp.basicSalary || 0);
+          if (emp.category === 'Job Order') {
+            // Paid per day or per hour. Look up DTR logs within cycle period
+            const dtrLogs = dtrLogsByEmployee[emp.id] || [];
+            if (dtrLogs.length > 0) {
+              if (emp.salaryType === 'hourly') {
+                let totalHours = 0;
                 for (const log of dtrLogs) {
-                  const dVal = log.date;
-                  let dateKey = '';
-                  if (dVal) {
-                    if (dVal instanceof Date) {
-                      try { dateKey = dVal.toISOString().split('T')[0]; } catch (e) {}
-                    } else {
-                      dateKey = String(dVal).split('T')[0];
+                  if (log.timeIn && log.timeOut) {
+                    const inDate = new Date(log.timeIn);
+                    const outDate = new Date(log.timeOut);
+                    const diffMs = outDate.getTime() - inDate.getTime();
+                    let hours = Math.max(0, diffMs / (1000 * 60 * 60));
+                    
+                    const inLocalMinutes = inDate.getHours() * 60 + inDate.getMinutes();
+                    const outLocalMinutes = outDate.getHours() * 60 + outDate.getMinutes();
+                    if (inLocalMinutes < 12 * 60 && outLocalMinutes > 13 * 60) {
+                      hours = Math.max(0, hours - 1);
                     }
+                    
+                    totalHours += hours;
                   }
-                  if (!dateKey) continue;
-                  if (!logsByDate[dateKey]) {
-                    logsByDate[dateKey] = [];
-                  }
-                  logsByDate[dateKey].push(log);
                 }
+                computedBasicPay = Number((totalHours * emp.basicSalary).toFixed(2));
+              } else {
+                // Clean daily rate: Count unique dates on which the employee had a clock-in record
+                const uniqueDates = new Set(dtrLogs.filter((log: any) => log.timeIn).map((log: any) => {
+                  const dVal = log.date;
+                  if (!dVal) return '';
+                  if (dVal instanceof Date) {
+                    try { return dVal.toISOString().split('T')[0]; } catch (e) { return ''; }
+                  }
+                  return String(dVal).split('T')[0];
+                }));
+                const totalDays = uniqueDates.size;
+                computedBasicPay = Number((totalDays * emp.basicSalary).toFixed(2));
+              }
+            } else {
+              // Fallback graceful values: Hourly -> 80 hours, Daily -> 10 days
+              const multiplier = emp.salaryType === 'hourly' ? 80 : 10;
+              computedBasicPay = Number((multiplier * emp.basicSalary).toFixed(2));
+            }
+          } else if (emp.category === 'Visiting Instructor') {
+            // Paid per unit or teaching hour. Look up DTR logs within the cycle period
+            const dtrLogs = dtrLogsByEmployee[emp.id] || [];
+            let tHours = 0;
 
-                let totalMinutes = 0;
-                const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            if (dtrLogs.length > 0) {
+              // Fetch the instructor's schedules
+              const schedules = schedulesByEmployee[emp.id] || [];
+              
+              // Group dtrLogs by date
+              const logsByDate: { [date: string]: any[] } = {};
+              for (const log of dtrLogs) {
+                const dVal = log.date;
+                let dateKey = '';
+                if (dVal) {
+                  if (dVal instanceof Date) {
+                    try { dateKey = dVal.toISOString().split('T')[0]; } catch (e) {}
+                  } else {
+                    dateKey = String(dVal).split('T')[0];
+                  }
+                }
+                if (!dateKey) continue;
+                if (!logsByDate[dateKey]) {
+                  logsByDate[dateKey] = [];
+                }
+                logsByDate[dateKey].push(log);
+              }
 
-                for (const [dateStr, dayLogs] of Object.entries(logsByDate)) {
-                  // Find day of week for this dateStr (YYYY-MM-DD)
-                  const dateParts = dateStr.split('-');
-                  if (dateParts.length < 3) continue;
-                  const yr = Number(dateParts[0]);
-                  const mo = Number(dateParts[1]);
-                  const dy = Number(dateParts[2]);
-                  const dt = new Date(yr, mo - 1, dy);
-                  const dayName = daysOfWeek[dt.getDay()];
+              let totalMinutes = 0;
+              const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-                  // Find schedules for this day
-                  const matchingSchedules = schedules.filter((s: any) => {
-                    const dateVal = dateStr.split('T')[0];
-                    if (s.effectiveFrom && dateVal < s.effectiveFrom.split('T')[0]) return false;
-                    if (s.effectiveTo && dateVal > s.effectiveTo.split('T')[0]) return false;
+              for (const [dateStr, dayLogs] of Object.entries(logsByDate)) {
+                // Find day of week for this dateStr (YYYY-MM-DD)
+                const dateParts = dateStr.split('-');
+                if (dateParts.length < 3) continue;
+                const yr = Number(dateParts[0]);
+                const mo = Number(dateParts[1]);
+                const dy = Number(dateParts[2]);
+                const dt = new Date(yr, mo - 1, dy);
+                const dayName = daysOfWeek[dt.getDay()];
 
-                    if (s.specificDate) {
-                      const sDate = s.specificDate.split('T')[0];
-                      return sDate === dateStr;
+                // Find schedules for this day
+                const matchingSchedules = schedules.filter((s: any) => {
+                  const dateVal = dateStr.split('T')[0];
+                  if (s.effectiveFrom && dateVal < s.effectiveFrom.split('T')[0]) return false;
+                  if (s.effectiveTo && dateVal > s.effectiveTo.split('T')[0]) return false;
+
+                  if (s.specificDate) {
+                    const sDate = s.specificDate.split('T')[0];
+                    return sDate === dateStr;
+                  }
+                  return s.dayOfWeek === dayName;
+                });
+
+                for (const sch of matchingSchedules) {
+                  if (sch.startTime && sch.endTime) {
+                    let sh = Number(sch.startTime.split(':')[0]);
+                    let sm = Number(sch.startTime.split(':')[1] || 0);
+                    if (sh > 0 && sh <= 6) sh += 12;
+
+                    let eh = Number(sch.endTime.split(':')[0]);
+                    let em = Number(sch.endTime.split(':')[1] || 0);
+                    if (eh > 0 && eh <= 6) eh += 12;
+
+                    const schedInMin = sh * 60 + sm;
+                    const schedOutMin = eh * 60 + em;
+
+                    // Calculate overlapping minutes
+                    let overlapMin = 0;
+                    for (const log of dayLogs) {
+                      if (log.timeIn && log.timeOut) {
+                        const inDate = new Date(log.timeIn);
+                        const outDate = new Date(log.timeOut);
+                        
+                        const logInMin = inDate.getHours() * 60 + inDate.getMinutes();
+                        const logOutMin = outDate.getHours() * 60 + outDate.getMinutes();
+
+                        const overlapIn = Math.max(logInMin, schedInMin);
+                        const overlapOut = Math.min(logOutMin, schedOutMin);
+                        overlapMin += Math.max(0, overlapOut - overlapIn);
+                      }
                     }
-                    return s.dayOfWeek === dayName;
+
+                    if (overlapMin > 0) {
+                      const schedDuration = Math.max(0, schedOutMin - schedInMin);
+                      totalMinutes += schedDuration;
+                    }
+                  }
+                }
+              }
+
+              tHours = Number((totalMinutes / 60).toFixed(2));
+            }
+
+            // Fallback to schedule-based calculation if no DTR logs found
+            if (tHours === 0) {
+              const schedules = schedulesByEmployee[emp.id] || [];
+              if (schedules.length > 0) {
+                let totalScheduledHours = 0;
+                const start = new Date(cycle.startDate);
+                const end = new Date(cycle.endDate);
+                
+                const recurringSchedules = schedules.filter((s: any) => !s.specificDate);
+                const specificSchedules = schedules.filter((s: any) => s.specificDate);
+
+                const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                let currentDate = new Date(start);
+                while (currentDate <= end) {
+                  const dayName = daysOfWeek[currentDate.getDay()];
+                  const dateStr = currentDate.toISOString().split('T')[0];
+                  
+                  const daySpecifics = specificSchedules.filter((s: any) => {
+                    const dateOnly = dateStr.split('T')[0];
+                    if (s.effectiveFrom && dateOnly < s.effectiveFrom.split('T')[0]) return false;
+                    if (s.effectiveTo && dateOnly > s.effectiveTo.split('T')[0]) return false;
+                    const sDate = s.specificDate ? s.specificDate.split('T')[0] : '';
+                    return sDate === dateStr;
                   });
 
-                  for (const sch of matchingSchedules) {
-                    if (sch.startTime && sch.endTime) {
-                      let sh = Number(sch.startTime.split(':')[0]);
-                      let sm = Number(sch.startTime.split(':')[1] || 0);
-                      if (sh > 0 && sh <= 6) sh += 12;
+                  if (daySpecifics.length > 0) {
+                    for (const sch of daySpecifics) {
+                      if (sch.startTime && sch.endTime) {
+                        let sh = Number(sch.startTime.split(':')[0]);
+                        let sm = Number(sch.startTime.split(':')[1] || 0);
+                        if (sh > 0 && sh <= 6) sh += 12;
 
-                      let eh = Number(sch.endTime.split(':')[0]);
-                      let em = Number(sch.endTime.split(':')[1] || 0);
-                      if (eh > 0 && eh <= 6) eh += 12;
+                        let eh = Number(sch.endTime.split(':')[0]);
+                        let em = Number(sch.endTime.split(':')[1] || 0);
+                        if (eh > 0 && eh <= 6) eh += 12;
 
-                      const schedInMin = sh * 60 + sm;
-                      const schedOutMin = eh * 60 + em;
-
-                      // Calculate overlapping minutes
-                      let overlapMin = 0;
-                      for (const log of dayLogs) {
-                        if (log.timeIn && log.timeOut) {
-                          const inDate = new Date(log.timeIn);
-                          const outDate = new Date(log.timeOut);
-                          
-                          const logInMin = inDate.getHours() * 60 + inDate.getMinutes();
-                          const logOutMin = outDate.getHours() * 60 + outDate.getMinutes();
-
-                          const overlapIn = Math.max(logInMin, schedInMin);
-                          const overlapOut = Math.min(logOutMin, schedOutMin);
-                          overlapMin += Math.max(0, overlapOut - overlapIn);
-                        }
-                      }
-
-                      if (overlapMin > 0) {
-                        const schedDuration = Math.max(0, schedOutMin - schedInMin);
-                        totalMinutes += schedDuration;
+                        const diffHours = (eh * 60 + em - (sh * 60 + sm)) / 60;
+                        totalScheduledHours += Math.max(0, diffHours);
                       }
                     }
-                  }
-                }
-
-                tHours = Number((totalMinutes / 60).toFixed(2));
-              }
-
-              // Fallback to schedule-based calculation if no DTR logs found
-              if (tHours === 0) {
-                const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(emp.id) as any;
-                if (schedules.length > 0) {
-                  let totalScheduledHours = 0;
-                  const start = new Date(cycle.startDate);
-                  const end = new Date(cycle.endDate);
-                  
-                  const recurringSchedules = schedules.filter((s: any) => !s.specificDate);
-                  const specificSchedules = schedules.filter((s: any) => s.specificDate);
-
-                  const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                  let currentDate = new Date(start);
-                  while (currentDate <= end) {
-                    const dayName = daysOfWeek[currentDate.getDay()];
-                    const dateStr = currentDate.toISOString().split('T')[0];
-                    
-                    const daySpecifics = specificSchedules.filter((s: any) => {
+                  } else {
+                    const dayRecurring = recurringSchedules.filter((s: any) => {
                       const dateOnly = dateStr.split('T')[0];
                       if (s.effectiveFrom && dateOnly < s.effectiveFrom.split('T')[0]) return false;
                       if (s.effectiveTo && dateOnly > s.effectiveTo.split('T')[0]) return false;
-                      const sDate = s.specificDate ? s.specificDate.split('T')[0] : '';
-                      return sDate === dateStr;
+
+                      return s.dayOfWeek === dayName;
                     });
+                    for (const sch of dayRecurring) {
+                      if (sch.startTime && sch.endTime) {
+                        let sh = Number(sch.startTime.split(':')[0]);
+                        let sm = Number(sch.startTime.split(':')[1] || 0);
+                        if (sh > 0 && sh <= 6) sh += 12;
 
-                    if (daySpecifics.length > 0) {
-                      for (const sch of daySpecifics) {
-                        if (sch.startTime && sch.endTime) {
-                          let sh = Number(sch.startTime.split(':')[0]);
-                          let sm = Number(sch.startTime.split(':')[1] || 0);
-                          if (sh > 0 && sh <= 6) sh += 12;
+                        let eh = Number(sch.endTime.split(':')[0]);
+                        let em = Number(sch.endTime.split(':')[1] || 0);
+                        if (eh > 0 && eh <= 6) eh += 12;
 
-                          let eh = Number(sch.endTime.split(':')[0]);
-                          let em = Number(sch.endTime.split(':')[1] || 0);
-                          if (eh > 0 && eh <= 6) eh += 12;
-
-                          const diffHours = (eh * 60 + em - (sh * 60 + sm)) / 60;
-                          totalScheduledHours += Math.max(0, diffHours);
-                        }
-                      }
-                    } else {
-                      const dayRecurring = recurringSchedules.filter((s: any) => {
-                        const dateOnly = dateStr.split('T')[0];
-                        if (s.effectiveFrom && dateOnly < s.effectiveFrom.split('T')[0]) return false;
-                        if (s.effectiveTo && dateOnly > s.effectiveTo.split('T')[0]) return false;
-
-                        return s.dayOfWeek === dayName;
-                      });
-                      for (const sch of dayRecurring) {
-                        if (sch.startTime && sch.endTime) {
-                          let sh = Number(sch.startTime.split(':')[0]);
-                          let sm = Number(sch.startTime.split(':')[1] || 0);
-                          if (sh > 0 && sh <= 6) sh += 12;
-
-                          let eh = Number(sch.endTime.split(':')[0]);
-                          let em = Number(sch.endTime.split(':')[1] || 0);
-                          if (eh > 0 && eh <= 6) eh += 12;
-
-                          const diffHours = (eh * 60 + em - (sh * 60 + sm)) / 60;
-                          totalScheduledHours += Math.max(0, diffHours);
-                        }
-                      }
-                    }
-
-                    currentDate.setDate(currentDate.getDate() + 1);
-                  }
-
-                  tHours = Number(totalScheduledHours.toFixed(2));
-                } else {
-                  tHours = 30; // Fallback graceful value
-                }
-              }
-
-              await db.prepare("UPDATE payroll_entries SET teachingHours = ? WHERE id = ?").run(tHours, entry.id);
-              computedBasicPay = Number((tHours * emp.basicSalary).toFixed(2));
-            } else {
-              // Regular Employee - Salaries and Wages-2nd Tranche based on DTR
-              let monthlyRate = emp.basicSalary;
-              baseCyclePay = cycle.type === 'semi-monthly' ? (monthlyRate / 2) : monthlyRate;
-              undertimeDeduction = 0.00;
-              
-              // Safe date format helper
-              const formatToYYYYMMDD = (dVal: any): string => {
-                if (!dVal) return '';
-                if (dVal instanceof Date) {
-                  const yr = dVal.getFullYear();
-                  const mo = String(dVal.getMonth() + 1).padStart(2, '0');
-                  const dy = String(dVal.getDate()).padStart(2, '0');
-                  return `${yr}-${mo}-${dy}`;
-                }
-                return String(dVal).split('T')[0];
-              };
-
-              const startDateStr = formatToYYYYMMDD(cycle.startDate);
-              const endDateStr = formatToYYYYMMDD(cycle.endDate);
-
-              // Fetch DTR logs and schedules for calculation
-              const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(emp.id) as any[];
-              const dtrLogs = await db.prepare("SELECT * FROM dtr_logs WHERE employeeId = ? AND date >= ? AND date <= ?").all(emp.id, startDateStr, endDateStr) as any[];
-              
-              if (dtrLogs.length === 0) {
-                computedBasicPay = 0.00;
-                dynamicAbsences = baseCyclePay;
-                undertimeDeduction = 0.00;
-              } else {
-                const [sYr, sMn, sDy] = startDateStr.split('-').map(Number);
-                const [eYr, eMn, eDy] = endDateStr.split('-').map(Number);
-                const start = new Date(sYr, sMn - 1, sDy);
-                const end = new Date(eYr, eMn - 1, eDy);
-                let currentDate = new Date(start);
-                
-                const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                let totalTardinessMinutes = 0;
-                let totalAbsenceDays = 0;
-                
-                const holidayRows = await db.prepare("SELECT date FROM holidays").all() as any[];
-                const holidayDates = new Set(holidayRows.map(h => h.date ? String(h.date).split('T')[0] : ''));
-
-                // Group dtrLogs by date YYYY-MM-DD
-                const logsByDate: { [dateStr: string]: any[] } = {};
-                for (const log of dtrLogs) {
-                  if (log.date) {
-                    let logDateStr = '';
-                    if (log.date instanceof Date) {
-                      try { logDateStr = log.date.toISOString().split('T')[0]; } catch (e) {}
-                    } else {
-                      logDateStr = String(log.date).split('T')[0];
-                    }
-                    if (logDateStr) {
-                      if (!logsByDate[logDateStr]) {
-                        logsByDate[logDateStr] = [];
-                      }
-                      logsByDate[logDateStr].push(log);
-                    }
-                  }
-                }
-
-                while (currentDate <= end) {
-                  const dateStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
-                  
-                  const dayOfWeek = currentDate.getDay();
-                  const dayName = daysOfWeekStr[dayOfWeek];
-                  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-                  const isHoliday = holidayDates.has(dateStr);
-
-                  const daySchedules = schedules.filter(sch => {
-                    if (sch.specificDate) {
-                      return sch.specificDate.split('T')[0] === dateStr;
-                    }
-                    return sch.dayOfWeek === dayName;
-                  });
-
-                  const hasSchedule = daySchedules.length > 0;
-                  // If they have no explicit schedules at all, default to Mon-Fri as regular work days
-                  const isWorkDay = hasSchedule || (!isWeekend && schedules.length === 0);
-
-                  // Skip holidays in deduction calculations (regular employees are paid during holidays)
-                  if (isHoliday && (!hasSchedule || daySchedules.every(s => !s.specificDate))) {
-                    currentDate.setDate(currentDate.getDate() + 1);
-                    continue;
-                  }
-
-                  if (isWorkDay) {
-                    let amStartTimeStr = '08:00';
-                    let amEndTimeStr = '12:00';
-                    let pmStartTimeStr = '13:00';
-                    let pmEndTimeStr = '17:00';
-
-                    if (hasSchedule) {
-                      const sortedSchedules = [...daySchedules].sort((a, b) => a.startTime.localeCompare(b.startTime));
-                      let schedAm = null;
-                      let schedPm = null;
-                      if (sortedSchedules.length >= 2) {
-                        schedAm = sortedSchedules[0];
-                        schedPm = sortedSchedules[1];
-                      } else if (sortedSchedules.length === 1) {
-                        const firstSched = sortedSchedules[0];
-                        const firstStartHour = Number(firstSched.startTime.split(':')[0]);
-                        if (firstStartHour < 12) {
-                          schedAm = firstSched;
-                        } else {
-                          schedPm = firstSched;
-                        }
-                      }
-
-                      if (schedAm) {
-                        amStartTimeStr = schedAm.startTime;
-                        amEndTimeStr = schedAm.endTime;
-                      } else {
-                        amStartTimeStr = '00:00';
-                        amEndTimeStr = '00:00';
-                      }
-
-                      if (schedPm) {
-                        pmStartTimeStr = schedPm.startTime;
-                        pmEndTimeStr = schedPm.endTime;
-                      } else {
-                        pmStartTimeStr = '00:00';
-                        pmEndTimeStr = '00:00';
-                      }
-                    }
-
-                    const getMinutesFromTime = (timeStr: string) => {
-                      if (!timeStr || timeStr === '00:00') return 0;
-                      let [h, m] = timeStr.split(':').map(Number);
-                      if (h > 0 && h <= 6) h += 12;
-                      return h * 60 + (m || 0);
-                    };
-
-                    const amStartMinutes = getMinutesFromTime(amStartTimeStr);
-                    const amEndMinutes = getMinutesFromTime(amEndTimeStr);
-                    const pmStartMinutes = getMinutesFromTime(pmStartTimeStr);
-                    const pmEndMinutes = getMinutesFromTime(pmEndTimeStr);
-
-                    const expectedMinutes = (amStartTimeStr !== '00:00' ? (amEndMinutes - amStartMinutes) : 0) +
-                                            (pmStartTimeStr !== '00:00' ? (pmEndMinutes - pmStartMinutes) : 0);
-
-                    const dayLogs = logsByDate[dateStr] || [];
-
-                    if (dayLogs.length === 0) {
-                      // Full absence on a work day
-                      totalAbsenceDays += 1;
-                    } else {
-                      // Had punches, compute total worked overlap
-                      const sorted = [...dayLogs].sort((a, b) => {
-                        const aTime = a.timeIn ? new Date(a.timeIn).getTime() : 0;
-                        const bTime = b.timeIn ? new Date(b.timeIn).getTime() : 0;
-                        return aTime - bTime;
-                      });
-
-                      let amInDate: Date | null = null;
-                      let amOutDate: Date | null = null;
-                      let pmInDate: Date | null = null;
-                      let pmOutDate: Date | null = null;
-
-                      if (sorted.length >= 2) {
-                        amInDate = sorted[0].timeIn ? new Date(sorted[0].timeIn) : null;
-                        amOutDate = sorted[0].timeOut ? new Date(sorted[0].timeOut) : null;
-                        pmInDate = sorted[1].timeIn ? new Date(sorted[1].timeIn) : null;
-                        pmOutDate = sorted[1].timeOut ? new Date(sorted[1].timeOut) : null;
-                      } else if (sorted.length === 1) {
-                        const singleLog = sorted[0];
-                        const inDate = singleLog.timeIn ? new Date(singleLog.timeIn) : null;
-                        let isAmShift = true;
-                        if (inDate) {
-                          const hour = inDate.getHours();
-                          if (hasSchedule) {
-                            if (amStartTimeStr !== '00:00' && pmStartTimeStr === '00:00') {
-                              isAmShift = true;
-                            } else if (pmStartTimeStr !== '00:00' && amStartTimeStr === '00:00') {
-                              isAmShift = false;
-                            } else {
-                              const amStartMin = getMinutesFromTime(amStartTimeStr);
-                              const pmStartMin = getMinutesFromTime(pmStartTimeStr);
-                              const logMin = hour * 60 + inDate.getMinutes();
-                              isAmShift = Math.abs(logMin - amStartMin) < Math.abs(logMin - pmStartMin);
-                            }
-                          } else {
-                            isAmShift = hour < 12;
-                          }
-                        }
-
-                        if (isAmShift) {
-                          amInDate = inDate;
-                          amOutDate = singleLog.timeOut ? new Date(singleLog.timeOut) : null;
-                        } else {
-                          pmInDate = inDate;
-                          pmOutDate = singleLog.timeOut ? new Date(singleLog.timeOut) : null;
-                        }
-                      }
-
-                      let totalWorkedMinutes = 0;
-                      const amStart = amStartTimeStr !== '00:00' ? amStartMinutes : 480;
-                      const amEnd = amEndTimeStr !== '00:00' ? amEndMinutes : 720;
-                      const pmStart = pmStartTimeStr !== '00:00' ? pmStartMinutes : 780;
-                      const pmEnd = pmEndTimeStr !== '00:00' ? pmEndMinutes : 1020;
-
-                      if (amInDate && amOutDate) {
-                        const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
-                        const departureMin = amOutDate.getHours() * 60 + amOutDate.getMinutes();
-                        const effectiveIn = Math.max(arrivalMin, amStart);
-                        const effectiveOut = Math.min(departureMin, amEnd);
-                        if (effectiveOut > effectiveIn) {
-                          totalWorkedMinutes += (effectiveOut - effectiveIn);
-                        }
-                      }
-
-                      if (pmInDate && pmOutDate) {
-                        const arrivalMin = pmInDate.getHours() * 60 + pmInDate.getMinutes();
-                        const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
-                        const effectiveIn = Math.max(arrivalMin, pmStart);
-                        const effectiveOut = Math.min(departureMin, pmEnd);
-                        if (effectiveOut > effectiveIn) {
-                          totalWorkedMinutes += (effectiveOut - effectiveIn);
-                        }
-                      }
-
-                      if (amInDate && pmOutDate && !amOutDate && !pmInDate) {
-                        const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
-                        const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
-                        let totalSpan = departureMin - arrivalMin;
-                        let worked = totalSpan - 60; // noon break (1 hour default)
-                        const activeSchedDuration = (amEnd - amStart) + (pmEnd - pmStart);
-                        worked = Math.min(worked, activeSchedDuration);
-                        if (worked > 0) {
-                          totalWorkedMinutes = worked;
-                        }
-                      }
-
-                      const targetExp = expectedMinutes || 480;
-                      if (totalWorkedMinutes < targetExp) {
-                        totalTardinessMinutes += (targetExp - totalWorkedMinutes);
+                        const diffHours = (eh * 60 + em - (sh * 60 + sm)) / 60;
+                        totalScheduledHours += Math.max(0, diffHours);
                       }
                     }
                   }
+
                   currentDate.setDate(currentDate.getDate() + 1);
                 }
 
-                // Hourly and minute rate derivation based on standard 22 working days monthly
-                const hourlyRate = monthlyRate / (22 * 8);
-                const minuteRate = hourlyRate / 60;
-                undertimeDeduction = totalTardinessMinutes * minuteRate;
-
-                // 22 working days in a month for daily rate equivalence
-                const dailyRate = monthlyRate / 22;
-                dynamicAbsences = Number((totalAbsenceDays * dailyRate).toFixed(2));
-
-                computedBasicPay = Math.max(0, Number((baseCyclePay - undertimeDeduction - dynamicAbsences).toFixed(2)));
+                tHours = Number(totalScheduledHours.toFixed(2));
+              } else {
+                tHours = 30; // Fallback graceful value
               }
             }
-          }
 
-          // Override Salaries/Wages dynamically if input is manual
-          if (custom.compSal2nd !== undefined) {
-            computedBasicPay = Number(custom.compSal2nd);
-          } else if (custom.absences !== undefined) {
-            computedBasicPay = Math.max(0, Number((baseCyclePay - undertimeDeduction - Number(custom.absences)).toFixed(2)));
-          }
+            teachingHoursToUpdate = tHours;
+            computedBasicPay = Number((tHours * emp.basicSalary).toFixed(2));
+          } else {
+            // Regular Employee - Salaries and Wages-2nd Tranche based on DTR
+            let monthlyRate = emp.basicSalary;
+            baseCyclePay = cycle.type === 'semi-monthly' ? (monthlyRate / 2) : monthlyRate;
+            undertimeDeduction = 0.00;
 
-          // Save back computed basicPay to the payroll entry
-          await db.prepare("UPDATE payroll_entries SET basicPay = ? WHERE id = ?").run(computedBasicPay, entry.id);
+            // Fetch DTR logs and schedules for calculation
+            const schedules = schedulesByEmployee[emp.id] || [];
+            const dtrLogs = dtrLogsByEmployee[emp.id] || [];
+            
+            if (dtrLogs.length === 0) {
+              computedBasicPay = 0.00;
+              dynamicAbsences = baseCyclePay;
+              undertimeDeduction = 0.00;
+            } else {
+              const [sYr, sMn, sDy] = startDateStr.split('-').map(Number);
+              const [eYr, eMn, eDy] = endDateStr.split('-').map(Number);
+              const start = new Date(sYr, sMn - 1, sDy);
+              const end = new Date(eYr, eMn - 1, eDy);
+              let currentDate = new Date(start);
+              
+              const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+              let totalTardinessMinutes = 0;
+              let totalAbsenceDays = 0;
 
-          // PERA (default is PHP 2,000.00)
-          const compPera = custom.compPera !== undefined ? Number(custom.compPera) : 2000.00;
+              // Group dtrLogs by date YYYY-MM-DD
+              const logsByDate: { [dateStr: string]: any[] } = {};
+              for (const log of dtrLogs) {
+                if (log.date) {
+                  let logDateStr = '';
+                  if (log.date instanceof Date) {
+                    try { logDateStr = log.date.toISOString().split('T')[0]; } catch (e) {}
+                  } else {
+                    logDateStr = String(log.date).split('T')[0];
+                  }
+                  if (logDateStr) {
+                    if (!logsByDate[logDateStr]) {
+                      logsByDate[logDateStr] = [];
+                    }
+                    logsByDate[logDateStr].push(log);
+                  }
+                }
+              }
 
-          // Absences deduction (default uses dynamic DTR computed value)
-          const absences = custom.absences !== undefined ? Number(custom.absences) : dynamicAbsences;
+              while (currentDate <= end) {
+                const dateStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
+                
+                const dayOfWeek = currentDate.getDay();
+                const dayName = daysOfWeekStr[dayOfWeek];
+                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                const isHoliday = holidayDates.has(dateStr);
 
-          // Calculate overtime
-          let computedOvertime = Number(entry.overtime || 0);
-          if (emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF')) {
-            const otHours = Number(entry.otHours || 0);
-            const monthlySalary = emp.basicSalary || 0;
-            const hourlyRate = monthlySalary / (22 * 8);
-            computedOvertime = Number((hourlyRate * otHours * 1.25).toFixed(2));
-            await db.prepare("UPDATE payroll_entries SET overtime = ? WHERE id = ?").run(computedOvertime, entry.id);
-          }
+                const daySchedules = schedules.filter(sch => {
+                  if (sch.specificDate) {
+                    return sch.specificDate.split('T')[0] === dateStr;
+                  }
+                  return sch.dayOfWeek === dayName;
+                });
 
-          // Gross Pay calculation (including PERA and other additions)
-          let gross = computedBasicPay + compPera + Number(entry.allowances || 0) + computedOvertime + Number(entry.bonuses || 0);
-          if (custom.compGross !== undefined) {
-            gross = Number(custom.compGross);
-          }
+                const hasSchedule = daySchedules.length > 0;
+                // If they have no explicit schedules at all, default to Mon-Fri as regular work days
+                const isWorkDay = hasSchedule || (!isWeekend && schedules.length === 0);
 
-          // --- CALCULATE DEFAULTS & CUSTOM VALUES FOR ALL COLUMNS ---
-          
-          // Load active catalog deductions for this employee from the database
-          const activeDeds = emp ? await db.prepare("SELECT type, amount FROM deductions WHERE employeeId = ?").all(emp.id) as any[] : [];
-          
-          const getDbDeduction = (field: string, defaultVal: number = 0.00) => {
-            const mappings: { [key: string]: string[] } = {
-              dedConsolLoan: ['consoloan', 'consol loan', 'consolidation loan', 'conso loan', 'consolidation', 'dedconsoloan'],
-              dedEmergencyLoan: ['emrgyln', 'gsis emergency loan', 'emergency loan', 'emrgy ln', 'emrgy_ln', 'emergency_loan', 'dedemergencyloan'],
-              dedGfal: ['gfal', 'gsis financial assistance loan', 'gsis financial assistance', 'gfal loan', 'dedgfal'],
-              dedMpl: ['mpl', 'multipurpose loan', 'multi purpose loan', 'multi-purpose loan', 'mpl loan', 'dedmpl', 'gsis multipurpose loan'],
-              dedCpl: ['cpl', 'computer purchase loan', 'computer loan', 'cpl loan', 'dedcpl', 'gsis computer loan', 'cpl_loan'],
-              dedMplLite: ['mpllite', 'mpl_lite', 'mpl-lite', 'mpl_lite rlp', 'mplliterlp', 'mpl lite', 'multi-purpose loan lite', 'dedmpllite', 'mpl_lite_rlp'],
-              dedEducAsst: ['educasst', 'educ_asst', 'educational assistance', 'educational assistance loan', 'educ asst', 'dededucasst', 'gsis educational assistance'],
-              dedPolicyLoan: ['policyloan', 'policy loan', 'gsis policy loan', 'policy_loan', 'dedpolicyloan'],
-              dedGsisPremPersonal: ['gsisprem', 'gsispersonal', 'gsisprempersonal', 'gsisEE', 'gsis personal', 'gsis contribution', 'gsis premium', 'gsis ee', 'dedgsisprempersonal', 'gsis prem personal', 'gsis personal share', 'gsis_prem', 'gsis personal premium'],
-              dedPagibigPersonal: ['pagibigprem', 'pagibigpersonal', 'pagibigpersonalee', 'pagibigregular', 'pagibigee', 'hdmfpersonal', 'hdmfpersonalee', 'hdmfee', 'pagibig regular', 'pagibig personal', 'pagibig contribution', 'pagibig premium', 'pagibig ee', 'hdmf personal', 'hdmf contribution', 'hdmf ee', 'dedpagibigpersonal', 'pag-ibig personal', 'pag-ibig ee', 'pag-ibig regular', 'pagibig_prem', 'hdmf premium', 'pag-ibig personal(ee)'],
-              dedPagibigMpl: ['pagibigmpl', 'pagibig_mpl', 'hdmf_mpl', 'pag-ibig mpl', 'dedpagibigmpl', 'hdmf mpl', 'pag-ibig mpl'],
-              dedSss: ['sss', 'dedsss', 'sss contribution', 'sss premium', 'sss ee', 'sss_prem', 'sss share'],
-              dedPagibigMp2: ['mp2', 'dedpagibigmp2', 'pagibig mp2', 'pag-ibig mp2', 'mp2 contribution', 'pagibig_mp2', 'hdmf mp2'],
-              dedPhilhealthCont: ['philhealth', 'dedphilhealthcont', 'philhealth contribution', 'philhealth premium', 'philhealth ee', 'philhealth cont', 'philhealth_prem', 'ph_prem', 'phee', 'ph ee', 'philhealth ee share', 'philhealth cont.'],
-              dedCsbLoan: ['csbloan', 'dedcsbloan', 'csb loan', 'csb', 'csbsalloan', 'csb sal loan'],
-              dedTaxWithheld: ['tax', 'dedtaxwithheld', 'withholding tax', 'tax withheld', 'wtax', 'income tax', 'withholding_tax', 'tax_withheld', 'wtax withheld', 'withholding tax(ee)', 'taxwithheld']
-            };
-            const colKeys = mappings[field] || [];
-            const matchedDeds = activeDeds.filter(d => {
-              const dT = String(d.type || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-              return colKeys.some(k => k.toLowerCase().replace(/[^a-z0-9]/g, '') === dT);
-            });
-            if (matchedDeds.length > 0) {
-              return matchedDeds.reduce((sum, d) => sum + Number(d.amount || 0), 0);
+                // Skip holidays in deduction calculations (regular employees are paid during holidays)
+                if (isHoliday && (!hasSchedule || daySchedules.every(s => !s.specificDate))) {
+                  currentDate.setDate(currentDate.getDate() + 1);
+                  continue;
+                }
+
+                if (isWorkDay) {
+                  let amStartTimeStr = '08:00';
+                  let amEndTimeStr = '12:00';
+                  let pmStartTimeStr = '13:00';
+                  let pmEndTimeStr = '17:00';
+
+                  if (hasSchedule) {
+                    const sortedSchedules = [...daySchedules].sort((a, b) => a.startTime.localeCompare(b.startTime));
+                    let schedAm = null;
+                    let schedPm = null;
+                    if (sortedSchedules.length >= 2) {
+                      schedAm = sortedSchedules[0];
+                      schedPm = sortedSchedules[1];
+                    } else if (sortedSchedules.length === 1) {
+                      const firstSched = sortedSchedules[0];
+                      const firstStartHour = Number(firstSched.startTime.split(':')[0]);
+                      if (firstStartHour < 12) {
+                        schedAm = firstSched;
+                      } else {
+                        schedPm = firstSched;
+                      }
+                    }
+
+                    if (schedAm) {
+                      amStartTimeStr = schedAm.startTime;
+                      amEndTimeStr = schedAm.endTime;
+                    } else {
+                      amStartTimeStr = '00:00';
+                      amEndTimeStr = '00:00';
+                    }
+
+                    if (schedPm) {
+                      pmStartTimeStr = schedPm.startTime;
+                      pmEndTimeStr = schedPm.endTime;
+                    } else {
+                      pmStartTimeStr = '00:00';
+                      pmEndTimeStr = '00:00';
+                    }
+                  }
+
+                  const getMinutesFromTime = (timeStr: string) => {
+                    if (!timeStr || timeStr === '00:00') return 0;
+                    let [h, m] = timeStr.split(':').map(Number);
+                    if (h > 0 && h <= 6) h += 12;
+                    return h * 60 + (m || 0);
+                  };
+
+                  const amStartMinutes = getMinutesFromTime(amStartTimeStr);
+                  const amEndMinutes = getMinutesFromTime(amEndTimeStr);
+                  const pmStartMinutes = getMinutesFromTime(pmStartTimeStr);
+                  const pmEndMinutes = getMinutesFromTime(pmEndTimeStr);
+
+                  const expectedMinutes = (amStartTimeStr !== '00:00' ? (amEndMinutes - amStartMinutes) : 0) +
+                                          (pmStartTimeStr !== '00:00' ? (pmEndMinutes - pmStartMinutes) : 0);
+
+                  const dayLogs = logsByDate[dateStr] || [];
+
+                  if (dayLogs.length === 0) {
+                    // Full absence on a work day
+                    totalAbsenceDays += 1;
+                  } else {
+                    // Had punches, compute total worked overlap
+                    const sorted = [...dayLogs].sort((a, b) => {
+                      const aTime = a.timeIn ? new Date(a.timeIn).getTime() : 0;
+                      const bTime = b.timeIn ? new Date(b.timeIn).getTime() : 0;
+                      return aTime - bTime;
+                    });
+
+                    let amInDate: Date | null = null;
+                    let amOutDate: Date | null = null;
+                    let pmInDate: Date | null = null;
+                    let pmOutDate: Date | null = null;
+
+                    if (sorted.length >= 2) {
+                      amInDate = sorted[0].timeIn ? new Date(sorted[0].timeIn) : null;
+                      amOutDate = sorted[0].timeOut ? new Date(sorted[0].timeOut) : null;
+                      pmInDate = sorted[1].timeIn ? new Date(sorted[1].timeIn) : null;
+                      pmOutDate = sorted[1].timeOut ? new Date(sorted[1].timeOut) : null;
+                    } else if (sorted.length === 1) {
+                      const singleLog = sorted[0];
+                      const inDate = singleLog.timeIn ? new Date(singleLog.timeIn) : null;
+                      let isAmShift = true;
+                      if (inDate) {
+                        const hour = inDate.getHours();
+                        if (hasSchedule) {
+                          if (amStartTimeStr !== '00:00' && pmStartTimeStr === '00:00') {
+                            isAmShift = true;
+                          } else if (pmStartTimeStr !== '00:00' && amStartTimeStr === '00:00') {
+                            isAmShift = false;
+                          } else {
+                            const amStartMin = getMinutesFromTime(amStartTimeStr);
+                            const pmStartMin = getMinutesFromTime(pmStartTimeStr);
+                            const logMin = hour * 60 + inDate.getMinutes();
+                            isAmShift = Math.abs(logMin - amStartMin) < Math.abs(logMin - pmStartMin);
+                          }
+                        } else {
+                          isAmShift = hour < 12;
+                        }
+                      }
+
+                      if (isAmShift) {
+                        amInDate = inDate;
+                        amOutDate = singleLog.timeOut ? new Date(singleLog.timeOut) : null;
+                      } else {
+                        pmInDate = inDate;
+                        pmOutDate = singleLog.timeOut ? new Date(singleLog.timeOut) : null;
+                      }
+                    }
+
+                    let totalWorkedMinutes = 0;
+                    const amStart = amStartTimeStr !== '00:00' ? amStartMinutes : 480;
+                    const amEnd = amEndTimeStr !== '00:00' ? amEndMinutes : 720;
+                    const pmStart = pmStartTimeStr !== '00:00' ? pmStartMinutes : 780;
+                    const pmEnd = pmEndTimeStr !== '00:00' ? pmEndMinutes : 1020;
+
+                    if (amInDate && amOutDate) {
+                      const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
+                      const departureMin = amOutDate.getHours() * 60 + amOutDate.getMinutes();
+                      const effectiveIn = Math.max(arrivalMin, amStart);
+                      const effectiveOut = Math.min(departureMin, amEnd);
+                      if (effectiveOut > effectiveIn) {
+                        totalWorkedMinutes += (effectiveOut - effectiveIn);
+                      }
+                    }
+
+                    if (pmInDate && pmOutDate) {
+                      const arrivalMin = pmInDate.getHours() * 60 + pmInDate.getMinutes();
+                      const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
+                      const effectiveIn = Math.max(arrivalMin, pmStart);
+                      const effectiveOut = Math.min(departureMin, pmEnd);
+                      if (effectiveOut > effectiveIn) {
+                        totalWorkedMinutes += (effectiveOut - effectiveIn);
+                      }
+                    }
+
+                    if (amInDate && pmOutDate && !amOutDate && !pmInDate) {
+                      const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
+                      const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
+                      let totalSpan = departureMin - arrivalMin;
+                      let worked = totalSpan - 60; // noon break (1 hour default)
+                      const activeSchedDuration = (amEnd - amStart) + (pmEnd - pmStart);
+                      worked = Math.min(worked, activeSchedDuration);
+                      if (worked > 0) {
+                        totalWorkedMinutes = worked;
+                      }
+                    }
+
+                    const targetExp = expectedMinutes || 480;
+                    if (totalWorkedMinutes < targetExp) {
+                      totalTardinessMinutes += (targetExp - totalWorkedMinutes);
+                    }
+                  }
+                }
+                currentDate.setDate(currentDate.getDate() + 1);
+              }
+
+              // Hourly and minute rate derivation based on standard 22 working days monthly
+              const hourlyRate = monthlyRate / (22 * 8);
+              const minuteRate = hourlyRate / 60;
+              undertimeDeduction = totalTardinessMinutes * minuteRate;
+
+              // 22 working days in a month for daily rate equivalence
+              const dailyRate = monthlyRate / 22;
+              dynamicAbsences = Number((totalAbsenceDays * dailyRate).toFixed(2));
+
+              computedBasicPay = Math.max(0, Number((baseCyclePay - undertimeDeduction - dynamicAbsences).toFixed(2)));
             }
-            return defaultVal;
-          };
-
-          // A. Government Shares
-          const isPhRegular = emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF');
-          const hasPh = isPhRegular || (emp && emp.category === 'Job Order' && emp.hasPhilhealth);
-          const hasHdmf = isPhRegular || (emp && emp.category === 'Job Order' && emp.hasPagibig);
-
-          const govSecGsis = custom.govSecGsis !== undefined ? Number(custom.govSecGsis) : (isPhRegular ? Number((computedBasicPay * 0.12).toFixed(2)) : 0.00);
-          const govSecHdmf = custom.govSecHdmf !== undefined ? Number(custom.govSecHdmf) : (hasHdmf ? 200.00 : 0.00);
-          const govSecPh = custom.govSecPh !== undefined ? Number(custom.govSecPh) : Number(((computedBasicPay * 0.05) / 2).toFixed(2));
-          const govSecEcip = custom.govSecEcip !== undefined ? Number(custom.govSecEcip) : (isPhRegular ? 100.00 : 0.00);
-
-          // B. GSIS Loans
-          const dedPolicyLoan = custom.dedPolicyLoan !== undefined ? Number(custom.dedPolicyLoan) : getDbDeduction('dedPolicyLoan', 0.00);
-          const dedConsolLoan = custom.dedConsolLoan !== undefined ? Number(custom.dedConsolLoan) : getDbDeduction('dedConsolLoan', 0.00);
-          const dedMplLite = custom.dedMplLite !== undefined ? Number(custom.dedMplLite) : getDbDeduction('dedMplLite', 0.00);
-          const dedMpl = custom.dedMpl !== undefined ? Number(custom.dedMpl) : getDbDeduction('dedMpl', 0.00);
-          const dedCpl = custom.dedCpl !== undefined ? Number(custom.dedCpl) : getDbDeduction('dedCpl', 0.00);
-          const dedGfal = custom.dedGfal !== undefined ? Number(custom.dedGfal) : getDbDeduction('dedGfal', 0.00);
-          const dedEmergencyLoan = custom.dedEmergencyLoan !== undefined ? Number(custom.dedEmergencyLoan) : getDbDeduction('dedEmergencyLoan', 0.00);
-          
-          // GSIS PERSONAL (EE) - standard 9% of basic salary
-          const dedGsisPremPersonal = custom.dedGsisPremPersonal !== undefined ? Number(custom.dedGsisPremPersonal) : 
-            getDbDeduction('dedGsisPremPersonal', (emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF') ? Number((computedBasicPay * 0.09).toFixed(2)) : 0.00));
-            
-          const dedEducAsst = custom.dedEducAsst !== undefined ? Number(custom.dedEducAsst) : getDbDeduction('dedEducAsst', 0.00);
-
-          // C. Pag-IBIG Loans & EE
-          const isPagibigRegular = emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF');
-          const hasPagibig = isPagibigRegular || (emp && emp.category === 'Job Order' && emp.hasPagibig);
-          const dedPagibigPersonal = custom.dedPagibigPersonal !== undefined ? Number(custom.dedPagibigPersonal) : 
-            getDbDeduction('dedPagibigPersonal', (hasPagibig ? Number((computedBasicPay * 0.02).toFixed(2)) : 0.00));
-            
-          const dedPagibigMpl = custom.dedPagibigMpl !== undefined ? Number(custom.dedPagibigMpl) : getDbDeduction('dedPagibigMpl', 0.00);
-
-          // D. SSS
-          const dedSss = custom.dedSss !== undefined ? Number(custom.dedSss) : 
-            getDbDeduction('dedSss', (emp && emp.category === 'Job Order' && emp.hasSss ? Number((computedBasicPay * 0.045).toFixed(2)) : 0.00));
-
-          // E. PhilHealth Contribution (PHILHLTH CONT) - standard 2.5% of basic salary EE share
-          const dedPagibigMp2 = custom.dedPagibigMp2 !== undefined ? Number(custom.dedPagibigMp2) : getDbDeduction('dedPagibigMp2', 0.00);
-          const dedPhilhealthCont = custom.dedPhilhealthCont !== undefined ? Number(custom.dedPhilhealthCont) : 
-            getDbDeduction('dedPhilhealthCont', (emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF') ? Number((computedBasicPay * 0.025).toFixed(2)) : 
-             (emp && emp.category === 'Job Order' && emp.hasPhilhealth ? Number((computedBasicPay * 0.025).toFixed(2)) : 0.00)));
-
-          // F. Other Loans and Tax
-          const dedCsbLoan = custom.dedCsbLoan !== undefined ? Number(custom.dedCsbLoan) : getDbDeduction('dedCsbLoan', 0.00);
-
-          // Default Withholding tax (TRAIN Law standard or override)
-          let taxVal = 0;
-          if (gross > 666666) taxVal = 183541.67 + (gross - 666666) * 0.35;
-          else if (gross > 166667) taxVal = 33541.67 + (gross - 166667) * 0.30;
-          else if (gross > 66667) taxVal = 8541.67 + (gross - 66667) * 0.25;
-          else if (gross > 33333) taxVal = 1875 + (gross - 33333) * 0.20;
-          else if (gross > 20833) taxVal = (gross - 20833) * 0.15;
-          
-          const dedTaxWithheld = custom.dedTaxWithheld !== undefined ? Number(custom.dedTaxWithheld) : getDbDeduction('dedTaxWithheld', Number(taxVal.toFixed(2)));
-
-          // Sum all personal deductions
-          const sumDeductions = Number((dedPolicyLoan + dedConsolLoan + dedMplLite + dedMpl + dedCpl + dedGfal + dedEmergencyLoan + 
-            dedGsisPremPersonal + dedEducAsst + dedPagibigPersonal + dedPagibigMpl + dedSss + dedPagibigMp2 + 
-            dedPhilhealthCont + dedCsbLoan + dedTaxWithheld).toFixed(2));
-
-          const net = Number((gross - sumDeductions).toFixed(2));
-
-          // Map all details into the deductions_json block
-          const deductionsMap = {
-            govSecGsis,
-            govSecHdmf,
-            govSecPh,
-            govSecEcip,
-            compSal2nd: computedBasicPay,
-            compPera,
-            absences,
-            dedPolicyLoan,
-            dedConsolLoan,
-            dedMplLite,
-            dedMpl,
-            dedCpl,
-            dedGfal,
-            dedEmergencyLoan,
-            dedGsisPremPersonal,
-            dedEducAsst,
-            dedPagibigPersonal,
-            dedPagibigMpl,
-            dedSss,
-            dedPagibigMp2,
-            dedPhilhealthCont,
-            dedCsbLoan,
-            dedTaxWithheld
-          };
-
-          await db.prepare(`
-            UPDATE payroll_entries SET 
-              grossPay = ?, 
-              deductions_json = ?, 
-              totalDeductions = ?, 
-              netPay = ?,
-              govSecGsis = ?,
-              govSecHdmf = ?,
-              govSecPh = ?,
-              govSecEcip = ?,
-              compSal2nd = ?,
-              compPera = ?,
-              compGross = ?,
-              absences = ?,
-              dedPolicyLoan = ?,
-              dedConsolLoan = ?,
-              dedMplLite = ?,
-              dedMpl = ?,
-              dedCpl = ?,
-              dedGfal = ?,
-              dedEmergencyLoan = ?,
-              dedGsisPremPersonal = ?,
-              dedEducAsst = ?,
-              dedPagibigPersonal = ?,
-              dedPagibigMpl = ?,
-              dedSss = ?,
-              dedPagibigMp2 = ?,
-              dedPhilhealthCont = ?,
-              dedCsbLoan = ?,
-              dedTaxWithheld = ?
-            WHERE id = ?
-          `).run(
-            gross, 
-            JSON.stringify(deductionsMap), 
-            sumDeductions, 
-            net,
-            govSecGsis,
-            govSecHdmf,
-            govSecPh,
-            govSecEcip,
-            computedBasicPay, // compSal2nd
-            compPera,
-            gross, // compGross
-            absences,
-            dedPolicyLoan,
-            dedConsolLoan,
-            dedMplLite,
-            dedMpl,
-            dedCpl,
-            dedGfal,
-            dedEmergencyLoan,
-            dedGsisPremPersonal,
-            dedEducAsst,
-            dedPagibigPersonal,
-            dedPagibigMpl,
-            dedSss,
-            dedPagibigMp2,
-            dedPhilhealthCont,
-            dedCsbLoan,
-            dedTaxWithheld,
-            entry.id
-          );
-
-          totalGross = Number((totalGross + gross).toFixed(2));
-          totalDeductions = Number((totalDeductions + sumDeductions).toFixed(2));
-          totalNet = Number((totalNet + net).toFixed(2));
+          }
         }
 
-        await db.prepare("UPDATE payroll_cycles SET totalGross = ?, totalDeductions = ?, totalNet = ? WHERE id = ?").run(totalGross, totalDeductions, totalNet, cycleId);
+        // Override Salaries/Wages dynamically if input is manual
+        if (custom.compSal2nd !== undefined) {
+          computedBasicPay = Number(custom.compSal2nd);
+        } else if (custom.absences !== undefined) {
+          computedBasicPay = Math.max(0, Number((baseCyclePay - undertimeDeduction - Number(custom.absences)).toFixed(2)));
+        }
+
+        // PERA (default is PHP 2,000.00)
+        const compPera = custom.compPera !== undefined ? Number(custom.compPera) : 2000.00;
+
+        // Absences deduction (default uses dynamic DTR computed value)
+        const absences = custom.absences !== undefined ? Number(custom.absences) : dynamicAbsences;
+
+        // Calculate overtime
+        let computedOvertime = Number(entry.overtime || 0);
+        if (emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF')) {
+          const otHours = Number(entry.otHours || 0);
+          const monthlySalary = emp.basicSalary || 0;
+          const hourlyRate = monthlySalary / (22 * 8);
+          computedOvertime = Number((hourlyRate * otHours * 1.25).toFixed(2));
+        }
+
+        // Gross Pay calculation (including PERA and other additions)
+        let gross = computedBasicPay + compPera + Number(entry.allowances || 0) + computedOvertime + Number(entry.bonuses || 0);
+        if (custom.compGross !== undefined) {
+          gross = Number(custom.compGross);
+        }
+
+        // --- CALCULATE DEFAULTS & CUSTOM VALUES FOR ALL COLUMNS ---
+        const activeDeds = emp ? (dedsByEmployee[emp.id] || []) : [];
+        
+        const getDbDeduction = (field: string, defaultVal: number = 0.00) => {
+          const mappings: { [key: string]: string[] } = {
+            dedConsolLoan: ['consoloan', 'consol loan', 'consolidation loan', 'conso loan', 'consolidation', 'dedconsoloan'],
+            dedEmergencyLoan: ['emrgyln', 'gsis emergency loan', 'emergency loan', 'emrgy ln', 'emrgy_ln', 'emergency_loan', 'dedemergencyloan'],
+            dedGfal: ['gfal', 'gsis financial assistance loan', 'gsis financial assistance', 'gfal loan', 'dedgfal'],
+            dedMpl: ['mpl', 'multipurpose loan', 'multi purpose loan', 'multi-purpose loan', 'mpl loan', 'dedmpl', 'gsis multipurpose loan'],
+            dedCpl: ['cpl', 'computer purchase loan', 'computer loan', 'cpl loan', 'dedcpl', 'gsis computer loan', 'cpl_loan'],
+            dedMplLite: ['mpllite', 'mpl_lite', 'mpl-lite', 'mpl_lite rlp', 'mplliterlp', 'mpl lite', 'multi-purpose loan lite', 'dedmpllite', 'mpl_lite_rlp'],
+            dedEducAsst: ['educasst', 'educ_asst', 'educational assistance', 'educational assistance loan', 'educ asst', 'dededucasst', 'gsis educational assistance'],
+            dedPolicyLoan: ['policyloan', 'policy loan', 'gsis policy loan', 'policy_loan', 'dedpolicyloan'],
+            dedGsisPremPersonal: ['gsisprem', 'gsispersonal', 'gsisprempersonal', 'gsisEE', 'gsis personal', 'gsis contribution', 'gsis premium', 'gsis ee', 'dedgsisprempersonal', 'gsis prem personal', 'gsis personal share', 'gsis_prem', 'gsis personal premium'],
+            dedPagibigPersonal: ['pagibigprem', 'pagibigpersonal', 'pagibigpersonalee', 'pagibigregular', 'pagibigee', 'hdmfpersonal', 'hdmfpersonalee', 'hdmfee', 'pagibig regular', 'pagibig personal', 'pagibig contribution', 'pagibig premium', 'pagibig ee', 'hdmf personal', 'hdmf contribution', 'hdmf ee', 'dedpagibigpersonal', 'pag-ibig personal', 'pag-ibig ee', 'pag-ibig regular', 'pagibig_prem', 'hdmf premium', 'pag-ibig personal(ee)'],
+            dedPagibigMpl: ['pagibigmpl', 'pagibig_mpl', 'hdmf_mpl', 'pag-ibig mpl', 'dedpagibigmpl', 'hdmf mpl', 'pag-ibig mpl'],
+            dedSss: ['sss', 'dedsss', 'sss contribution', 'sss premium', 'sss ee', 'sss_prem', 'sss share'],
+            dedPagibigMp2: ['mp2', 'dedpagibigmp2', 'pagibig mp2', 'pag-ibig mp2', 'mp2 contribution', 'pagibig_mp2', 'hdmf mp2'],
+            dedPhilhealthCont: ['philhealth', 'dedphilhealthcont', 'philhealth contribution', 'philhealth premium', 'philhealth ee', 'philhealth cont', 'philhealth_prem', 'ph_prem', 'phee', 'ph ee', 'philhealth ee share', 'philhealth cont.'],
+            dedCsbLoan: ['csbloan', 'dedcsbloan', 'csb loan', 'csb', 'csbsalloan', 'csb sal loan'],
+            dedTaxWithheld: ['tax', 'dedtaxwithheld', 'withholding tax', 'tax withheld', 'wtax', 'income tax', 'withholding_tax', 'tax_withheld', 'wtax withheld', 'withholding tax(ee)', 'taxwithheld']
+          };
+          const colKeys = mappings[field] || [];
+          const matchedDeds = activeDeds.filter(d => {
+            const dT = String(d.type || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            return colKeys.some(k => k.toLowerCase().replace(/[^a-z0-9]/g, '') === dT);
+          });
+          if (matchedDeds.length > 0) {
+            return matchedDeds.reduce((sum, d) => sum + Number(d.amount || 0), 0);
+          }
+          return defaultVal;
+        };
+
+        // A. Government Shares
+        const isPhRegular = emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF');
+        const hasPh = isPhRegular || (emp && emp.category === 'Job Order' && emp.hasPhilhealth);
+        const hasHdmf = isPhRegular || (emp && emp.category === 'Job Order' && emp.hasPagibig);
+
+        const govSecGsis = custom.govSecGsis !== undefined ? Number(custom.govSecGsis) : (isPhRegular ? Number((computedBasicPay * 0.12).toFixed(2)) : 0.00);
+        const govSecHdmf = custom.govSecHdmf !== undefined ? Number(custom.govSecHdmf) : (hasHdmf ? 200.00 : 0.00);
+        const govSecPh = custom.govSecPh !== undefined ? Number(custom.govSecPh) : Number(((computedBasicPay * 0.05) / 2).toFixed(2));
+        const govSecEcip = custom.govSecEcip !== undefined ? Number(custom.govSecEcip) : (isPhRegular ? 100.00 : 0.00);
+
+        // B. GSIS Loans
+        const dedPolicyLoan = custom.dedPolicyLoan !== undefined ? Number(custom.dedPolicyLoan) : getDbDeduction('dedPolicyLoan', 0.00);
+        const dedConsolLoan = custom.dedConsolLoan !== undefined ? Number(custom.dedConsolLoan) : getDbDeduction('dedConsolLoan', 0.00);
+        const dedMplLite = custom.dedMplLite !== undefined ? Number(custom.dedMplLite) : getDbDeduction('dedMplLite', 0.00);
+        const dedMpl = custom.dedMpl !== undefined ? Number(custom.dedMpl) : getDbDeduction('dedMpl', 0.00);
+        const dedCpl = custom.dedCpl !== undefined ? Number(custom.dedCpl) : getDbDeduction('dedCpl', 0.00);
+        const dedGfal = custom.dedGfal !== undefined ? Number(custom.dedGfal) : getDbDeduction('dedGfal', 0.00);
+        const dedEmergencyLoan = custom.dedEmergencyLoan !== undefined ? Number(custom.dedEmergencyLoan) : getDbDeduction('dedEmergencyLoan', 0.00);
+        
+        // GSIS PERSONAL (EE) - standard 9% of basic salary
+        const dedGsisPremPersonal = custom.dedGsisPremPersonal !== undefined ? Number(custom.dedGsisPremPersonal) : 
+          getDbDeduction('dedGsisPremPersonal', (emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF') ? Number((computedBasicPay * 0.09).toFixed(2)) : 0.00));
+          
+        const dedEducAsst = custom.dedEducAsst !== undefined ? Number(custom.dedEducAsst) : getDbDeduction('dedEducAsst', 0.00);
+
+        // C. Pag-IBIG Loans & EE
+        const isPagibigRegular = emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF');
+        const hasPagibig = isPagibigRegular || (emp && emp.category === 'Job Order' && emp.hasPagibig);
+        const dedPagibigPersonal = custom.dedPagibigPersonal !== undefined ? Number(custom.dedPagibigPersonal) : 
+          getDbDeduction('dedPagibigPersonal', (hasPagibig ? Number((computedBasicPay * 0.02).toFixed(2)) : 0.00));
+          
+        const dedPagibigMpl = custom.dedPagibigMpl !== undefined ? Number(custom.dedPagibigMpl) : getDbDeduction('dedPagibigMpl', 0.00);
+
+        // D. SSS
+        const dedSss = custom.dedSss !== undefined ? Number(custom.dedSss) : 
+          getDbDeduction('dedSss', (emp && emp.category === 'Job Order' && emp.hasSss ? Number((computedBasicPay * 0.045).toFixed(2)) : 0.00));
+
+        // E. PhilHealth Contribution (PHILHLTH CONT) - standard 2.5% of basic salary EE share
+        const dedPagibigMp2 = custom.dedPagibigMp2 !== undefined ? Number(custom.dedPagibigMp2) : getDbDeduction('dedPagibigMp2', 0.00);
+        const dedPhilhealthCont = custom.dedPhilhealthCont !== undefined ? Number(custom.dedPhilhealthCont) : 
+          getDbDeduction('dedPhilhealthCont', (emp && (emp.category === 'Regular Employee' || emp.category === 'Regular' || emp.category === 'FACULTY' || emp.category === 'STAFF') ? Number((computedBasicPay * 0.025).toFixed(2)) : 
+           (emp && emp.category === 'Job Order' && emp.hasPhilhealth ? Number((computedBasicPay * 0.025).toFixed(2)) : 0.00)));
+
+        // F. Other Loans and Tax
+        const dedCsbLoan = custom.dedCsbLoan !== undefined ? Number(custom.dedCsbLoan) : getDbDeduction('dedCsbLoan', 0.00);
+
+        // Default Withholding tax (TRAIN Law standard or override)
+        let taxVal = 0;
+        if (gross > 666666) taxVal = 183541.67 + (gross - 666666) * 0.35;
+        else if (gross > 166667) taxVal = 33541.67 + (gross - 166667) * 0.30;
+        else if (gross > 66667) taxVal = 8541.67 + (gross - 66667) * 0.25;
+        else if (gross > 33333) taxVal = 1875 + (gross - 33333) * 0.20;
+        else if (gross > 20833) taxVal = (gross - 20833) * 0.15;
+        
+        const dedTaxWithheld = custom.dedTaxWithheld !== undefined ? Number(custom.dedTaxWithheld) : getDbDeduction('dedTaxWithheld', Number(taxVal.toFixed(2)));
+
+        // Sum all personal deductions
+        const sumDeductions = Number((dedPolicyLoan + dedConsolLoan + dedMplLite + dedMpl + dedCpl + dedGfal + dedEmergencyLoan + 
+          dedGsisPremPersonal + dedEducAsst + dedPagibigPersonal + dedPagibigMpl + dedSss + dedPagibigMp2 + 
+          dedPhilhealthCont + dedCsbLoan + dedTaxWithheld).toFixed(2));
+
+        const net = Number((gross - sumDeductions).toFixed(2));
+
+        // Map all details into the deductions_json block
+        const deductionsMap = {
+          govSecGsis,
+          govSecHdmf,
+          govSecPh,
+          govSecEcip,
+          compSal2nd: computedBasicPay,
+          compPera,
+          absences,
+          dedPolicyLoan,
+          dedConsolLoan,
+          dedMplLite,
+          dedMpl,
+          dedCpl,
+          dedGfal,
+          dedEmergencyLoan,
+          dedGsisPremPersonal,
+          dedEducAsst,
+          dedPagibigPersonal,
+          dedPagibigMpl,
+          dedSss,
+          dedPagibigMp2,
+          dedPhilhealthCont,
+          dedCsbLoan,
+          dedTaxWithheld
+        };
+
+        // SINGLE UNIFIED UPDATE STATEMENT
+        await db.prepare(`
+          UPDATE payroll_entries SET 
+            basicPay = ?,
+            teachingHours = ?,
+            overtime = ?,
+            grossPay = ?, 
+            deductions_json = ?, 
+            totalDeductions = ?, 
+            netPay = ?,
+            govSecGsis = ?,
+            govSecHdmf = ?,
+            govSecPh = ?,
+            govSecEcip = ?,
+            compSal2nd = ?,
+            compPera = ?,
+            compGross = ?,
+            absences = ?,
+            dedPolicyLoan = ?,
+            dedConsolLoan = ?,
+            dedMplLite = ?,
+            dedMpl = ?,
+            dedCpl = ?,
+            dedGfal = ?,
+            dedEmergencyLoan = ?,
+            dedGsisPremPersonal = ?,
+            dedEducAsst = ?,
+            dedPagibigPersonal = ?,
+            dedPagibigMpl = ?,
+            dedSss = ?,
+            dedPagibigMp2 = ?,
+            dedPhilhealthCont = ?,
+            dedCsbLoan = ?,
+            dedTaxWithheld = ?
+          WHERE id = ?
+        `).run(
+          computedBasicPay,
+          teachingHoursToUpdate,
+          computedOvertime,
+          gross, 
+          JSON.stringify(deductionsMap), 
+          sumDeductions, 
+          net,
+          govSecGsis,
+          govSecHdmf,
+          govSecPh,
+          govSecEcip,
+          computedBasicPay, // compSal2nd
+          compPera,
+          gross, // compGross
+          absences,
+          dedPolicyLoan,
+          dedConsolLoan,
+          dedMplLite,
+          dedMpl,
+          dedCpl,
+          dedGfal,
+          dedEmergencyLoan,
+          dedGsisPremPersonal,
+          dedEducAsst,
+          dedPagibigPersonal,
+          dedPagibigMpl,
+          dedSss,
+          dedPagibigMp2,
+          dedPhilhealthCont,
+          dedCsbLoan,
+          dedTaxWithheld,
+          entry.id
+        );
+
+        totalGross = Number((totalGross + gross).toFixed(2));
+        totalDeductions = Number((totalDeductions + sumDeductions).toFixed(2));
+        totalNet = Number((totalNet + net).toFixed(2));
+      }
+
+      if (onlyEmployeeId) {
+        const summary = await db.prepare("SELECT SUM(grossPay) as sumGross, SUM(totalDeductions) as sumDeds, SUM(netPay) as sumNet FROM payroll_entries WHERE cycleId = ?").get(cycleId) as any;
+        totalGross = summary?.sumGross || 0;
+        totalDeductions = summary?.sumDeds || 0;
+        totalNet = summary?.sumNet || 0;
+      }
+
+      await db.prepare("UPDATE payroll_cycles SET totalGross = ?, totalDeductions = ?, totalNet = ? WHERE id = ?").run(totalGross, totalDeductions, totalNet, cycleId);
     } catch (error) {
       throw error;
     }
-  };
+  });
 
   // Auth
   app.post("/api/auth/login", asyncHandler(async (req: any, res: any) => {
@@ -2307,7 +2380,7 @@ async function startServer() {
       await db.prepare("UPDATE payroll_entries SET custom_values_json = ? WHERE id = ?").run(JSON.stringify(mergedCustom), req.params.id);
     }
 
-    await recalculateCycle(entry.cycleId);
+    await recalculateCycle(entry.cycleId, entry.employeeId);
     res.json({ success: true });
   }));
 
@@ -2339,7 +2412,7 @@ async function startServer() {
       await db.prepare("INSERT INTO payroll_entries (id, cycleId, employeeId, employeeName, basicPay, grossPay, netPay) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
         `entry-${Date.now()}-${emp.id}`, cycleId, emp.id, `${emp.lastName}, ${emp.firstName}`, basicPay, basicPay, basicPay
       );
-      await recalculateCycle(cycleId);
+      await recalculateCycle(cycleId, emp.id);
       res.json({ success: true });
     } catch (error: any) {
       console.error("Add Employee to Cycle Error:", error);
@@ -2434,201 +2507,250 @@ async function startServer() {
     }
   }));
 
+  app.post("/api/dtr/save-day", asyncHandler(async (req: any, res: any) => {
+    const { employeeId, date, amIn, amOut, pmIn, pmOut, notes } = req.body;
+    if (!employeeId || !date) {
+      return res.status(400).json({ error: "Employee and Date are required" });
+    }
+
+    try {
+      const saveTx = db.transaction(async () => {
+        // Delete existing logs on this day for the selected employee to prevent conflict
+        await db.prepare("DELETE FROM dtr_logs WHERE employeeId = ? AND date = ?").run(employeeId, date);
+
+        const makeId = () => `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+
+        // AM Session
+        if (amIn) {
+          const fullTimeIn = amIn.includes("T") ? amIn : `${date}T${amIn}:00`;
+          const fullTimeOut = amOut ? (amOut.includes("T") ? amOut : `${date}T${amOut}:00`) : null;
+          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+            makeId(), employeeId, date, fullTimeIn, fullTimeOut, notes || "AM Session"
+          );
+        }
+
+        // PM Session
+        if (pmIn) {
+          const fullTimeIn = pmIn.includes("T") ? pmIn : `${date}T${pmIn}:00`;
+          const fullTimeOut = pmOut ? (pmOut.includes("T") ? pmOut : `${date}T${pmOut}:00`) : null;
+          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+            makeId(), employeeId, date, fullTimeIn, fullTimeOut, notes || "PM Session"
+          );
+        }
+      });
+
+      await saveTx();
+      await autoRecalculatePayrollForEmployee(employeeId);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Save Day DTR Error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  }));
+
   app.post("/api/dtr/simulate", asyncHandler(async (req: any, res: any) => {
     const { employeeId, year, month } = req.body;
     if (!employeeId || !year || !month) {
       return res.status(400).json({ error: "employeeId, year, and month are required" });
     }
 
-    const employee = await db.prepare("SELECT * FROM employees WHERE id = ?").get(employeeId) as any;
-    if (!employee) {
-      return res.status(404).json({ error: "Employee not found" });
-    }
-
-    const category = employee.category || "Regular Employee";
-    const yearMonthStr = `${year}-${String(month).padStart(2, "0")}`;
-
-    await db.prepare("DELETE FROM dtr_logs WHERE employeeId = ? AND date LIKE ?").run(employeeId, `${yearMonthStr}%`);
-
-    const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(employeeId) as any[];
-
-    const parseTo24Hour = (timeStr: string) => {
-      if (!timeStr) return { hour: 0, minute: 0 };
-      let [h, m] = timeStr.split(":").map(Number);
-      if (h > 0 && h <= 6) h += 12;
-      return { hour: h, minute: m || 0 };
-    };
-
-    const get24HourTimeStr = (tStr: string) => {
-      if (!tStr) return "";
-      let [h, m] = tStr.split(":").map(Number);
-      if (h > 0 && h <= 6) h += 12;
-      const mm = m || 0;
-      return `${h < 10 ? "0" + h : h}:${mm < 10 ? "0" + mm : mm}`;
-    };
-
-    const daysInMonth = new Date(Number(year), Number(month), 0).getDate();
     let count = 0;
 
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-      const dateObj = new Date(Number(year), Number(month) - 1, day);
-      const dayOfWeek = dateObj.getDay();
+    const runSimulationTx = db.transaction(async () => {
+      const employee = await db.prepare("SELECT * FROM employees WHERE id = ?").get(employeeId) as any;
+      if (!employee) {
+        throw new Error("Employee not found");
+      }
 
-      if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+      const category = employee.category || "Regular Employee";
+      const yearMonthStr = `${year}-${String(month).padStart(2, "0")}`;
 
-      const daysOfWeekStr = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-      const dayName = daysOfWeekStr[dayOfWeek];
+      await db.prepare("DELETE FROM dtr_logs WHERE employeeId = ? AND date LIKE ?").run(employeeId, `${yearMonthStr}%`);
 
-      const daySchedules = schedules.filter((sch: any) => {
-        const dateVal = dateStr;
-        if (sch.effectiveFrom && dateVal < sch.effectiveFrom.split("T")[0]) return false;
-        if (sch.effectiveTo && dateVal > sch.effectiveTo.split("T")[0]) return false;
+      const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(employeeId) as any[];
 
-        if (sch.specificDate) {
-          const sDate = sch.specificDate.split("T")[0];
-          return sDate === dateStr;
-        }
-        return sch.dayOfWeek === dayName;
-      });
+      const parseTo24Hour = (timeStr: string) => {
+        if (!timeStr) return { hour: 0, minute: 0 };
+        let [h, m] = timeStr.split(":").map(Number);
+        if (h > 0 && h <= 6) h += 12;
+        return { hour: h, minute: m || 0 };
+      };
 
-      if (category === "Job Order") {
-        const inHour = 8;
-        const inMin = Math.floor(Math.random() * 10);
-        const outHour = 11;
-        const outMin = Math.floor(Math.random() * 5);
+      const get24HourTimeStr = (tStr: string) => {
+        if (!tStr) return "";
+        let [h, m] = tStr.split(":").map(Number);
+        if (h > 0 && h <= 6) h += 12;
+        const mm = m || 0;
+        return `${h < 10 ? "0" + h : h}:${mm < 10 ? "0" + mm : mm}`;
+      };
 
-        const pmInHour = 13;
-        const pmInMin = Math.floor(Math.random() * 10);
-        const pmOutHour = 17;
-        const pmOutMin = Math.floor(Math.random() * 10);
+      const daysInMonth = new Date(Number(year), Number(month), 0).getDate();
 
-        const amInStr = `${String(inHour).padStart(2, "0")}:${String(inMin).padStart(2, "0")}`;
-        const amOutStr = `${String(outHour).padStart(2, "0")}:${String(outMin).padStart(2, "0")}`;
-        const pmInStr = `${String(pmInHour).padStart(2, "0")}:${String(pmInMin).padStart(2, "0")}`;
-        const pmOutStr = `${String(pmOutHour).padStart(2, "0")}:${String(pmOutMin).padStart(2, "0")}`;
+      for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        const dateObj = new Date(Number(year), Number(month) - 1, day);
+        const dayOfWeek = dateObj.getDay();
 
-        const amId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-        await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
-          amId, employeeId, dateStr, `${dateStr}T${amInStr}:00`, `${dateStr}T${amOutStr}:00`, "AM shift"
-        );
+        if (dayOfWeek === 0 || dayOfWeek === 6) continue;
 
-        const pmId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-        await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
-          pmId, employeeId, dateStr, `${dateStr}T${pmInStr}:00`, `${dateStr}T${pmOutStr}:00`, "PM shift"
-        );
-        count += 2;
-      } else if (category === "Visiting Instructor") {
-        if (daySchedules.length === 0) continue;
+        const daysOfWeekStr = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const dayName = daysOfWeekStr[dayOfWeek];
 
-        for (const sch of daySchedules) {
-          if (sch.startTime && sch.endTime) {
-            let [sh, sm] = sch.startTime.split(":").map(Number);
-            let [eh, em] = sch.endTime.split(":").map(Number);
+        const daySchedules = schedules.filter((sch: any) => {
+          const dateVal = dateStr;
+          if (sch.effectiveFrom && dateVal < sch.effectiveFrom.split("T")[0]) return false;
+          if (sch.effectiveTo && dateVal > sch.effectiveTo.split("T")[0]) return false;
 
-            const arrivalOffset = Math.floor(Math.random() * 6) - 3;
-            let minutesIn = sm + arrivalOffset;
-            let hourIn = sh;
-            if (minutesIn < 0) { minutesIn = 60 + minutesIn; hourIn -= 1; }
-            if (minutesIn >= 60) { minutesIn = minutesIn - 60; hourIn += 1; }
+          if (sch.specificDate) {
+            const sDate = sch.specificDate.split("T")[0];
+            return sDate === dateStr;
+          }
+          return sch.dayOfWeek === dayName;
+        });
 
-            const departureOffset = Math.floor(Math.random() * 5);
-            let minutesOut = em + departureOffset;
-            let hourOut = eh;
-            if (minutesOut >= 60) { minutesOut = minutesOut - 60; hourOut += 1; }
+        if (category === "Job Order") {
+          const inHour = 8;
+          const inMin = Math.floor(Math.random() * 10);
+          const outHour = 11;
+          const outMin = Math.floor(Math.random() * 5);
 
-            const inStr = `${String(hourIn).padStart(2, "0")}:${String(minutesIn).padStart(2, "0")}`;
-            const outStr = `${String(hourOut).padStart(2, "0")}:${String(minutesOut).padStart(2, "0")}`;
+          const pmInHour = 13;
+          const pmInMin = Math.floor(Math.random() * 10);
+          const pmOutHour = 17;
+          const pmOutMin = Math.floor(Math.random() * 10);
 
-            const visId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          const amInStr = `${String(inHour).padStart(2, "0")}:${String(inMin).padStart(2, "0")}`;
+          const amOutStr = `${String(outHour).padStart(2, "0")}:${String(outMin).padStart(2, "0")}`;
+          const pmInStr = `${String(pmInHour).padStart(2, "0")}:${String(pmInMin).padStart(2, "0")}`;
+          const pmOutStr = `${String(pmOutHour).padStart(2, "0")}:${String(pmOutMin).padStart(2, "0")}`;
+
+          const amId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+            amId, employeeId, dateStr, `${dateStr}T${amInStr}:00`, `${dateStr}T${amOutStr}:00`, "AM shift"
+          );
+
+          const pmId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+            pmId, employeeId, dateStr, `${dateStr}T${pmInStr}:00`, `${dateStr}T${pmOutStr}:00`, "PM shift"
+          );
+          count += 2;
+        } else if (category === "Visiting Instructor") {
+          if (daySchedules.length === 0) continue;
+
+          for (const sch of daySchedules) {
+            if (sch.startTime && sch.endTime) {
+              let [sh, sm] = sch.startTime.split(":").map(Number);
+              let [eh, em] = sch.endTime.split(":").map(Number);
+
+              const arrivalOffset = Math.floor(Math.random() * 6) - 3;
+              let minutesIn = sm + arrivalOffset;
+              let hourIn = sh;
+              if (minutesIn < 0) { minutesIn = 60 + minutesIn; hourIn -= 1; }
+              if (minutesIn >= 60) { minutesIn = minutesIn - 60; hourIn += 1; }
+
+              const departureOffset = Math.floor(Math.random() * 5);
+              let minutesOut = em + departureOffset;
+              let hourOut = eh;
+              if (minutesOut >= 60) { minutesOut = minutesOut - 60; hourOut += 1; }
+
+              const inStr = `${String(hourIn).padStart(2, "0")}:${String(minutesIn).padStart(2, "0")}`;
+              const outStr = `${String(hourOut).padStart(2, "0")}:${String(minutesOut).padStart(2, "0")}`;
+
+              const visId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+              await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+                visId, employeeId, dateStr, `${dateStr}T${inStr}:00`, `${dateStr}T${outStr}:00`, `Simulated: ${sch.subject || "Class"}`
+              );
+              count++;
+            }
+          }
+        } else {
+          const schedAm = daySchedules.find(s => get24HourTimeStr(s.startTime) < "12:00");
+          const schedPm = daySchedules.find(s => get24HourTimeStr(s.startTime) >= "12:00");
+
+          let amStartStr = "08:00";
+          let amEndStr = "11:00";
+          let pmStartStr = "13:00";
+          let pmEndStr = "17:00";
+
+          if (schedAm) {
+            amStartStr = schedAm.startTime;
+            amEndStr = schedAm.endTime;
+          } else if (daySchedules.length > 0) {
+            amStartStr = "00:00";
+            amEndStr = "00:00";
+          }
+
+          if (schedPm) {
+            pmStartStr = schedPm.startTime;
+            pmEndStr = schedPm.endTime;
+          } else if (daySchedules.length > 0) {
+            pmStartStr = "00:00";
+            pmEndStr = "00:00";
+          }
+
+          let amInStr = "";
+          let amOutStr = "";
+          if (amStartStr !== "00:00" && amEndStr !== "00:00") {
+            const { hour: ash, minute: asm } = parseTo24Hour(amStartStr);
+            const amInOffset = Math.floor(Math.random() * 15) - 10;
+            let amInMin = asm + amInOffset;
+            let amInHour = ash;
+            if (amInMin < 0) { amInMin = 60 + amInMin; amInHour -= 1; }
+            amInStr = `${String(amInHour).padStart(2, "0")}:${String(amInMin).padStart(2, "0")}`;
+
+            const { hour: aeh, minute: aem } = parseTo24Hour(amEndStr);
+            const amOutOffset = Math.floor(Math.random() * 6);
+            let amOutMin = aem + amOutOffset;
+            let amOutHour = aeh;
+            amOutStr = `${String(amOutHour).padStart(2, "0")}:${String(amOutMin).padStart(2, "0")}`;
+          }
+
+          let pmInStr = "";
+          let pmOutStr = "";
+          if (pmStartStr !== "00:00" && pmEndStr !== "00:00") {
+            const { hour: psh, minute: psm } = parseTo24Hour(pmStartStr);
+            const pmInOffset = Math.floor(Math.random() * 12) - 5;
+            let pmInMin = psm + pmInOffset;
+            let pmInHour = psh;
+            if (pmInMin < 0) { pmInMin = 60 + pmInMin; pmInHour -= 1; }
+            pmInStr = `${String(pmInHour).padStart(2, "0")}:${String(pmInMin).padStart(2, "0")}`;
+
+            const { hour: peh, minute: pem } = parseTo24Hour(pmEndStr);
+            const isUndertime = Math.random() < 0.08;
+            const pmOutOffset = isUndertime ? -30 : Math.floor(Math.random() * 12);
+            let pmOutMin = pem + pmOutOffset;
+            let pmOutHour = peh;
+            if (pmOutMin < 0) { pmOutMin = 60 + pmOutMin; pmOutHour -= 1; }
+            pmOutStr = `${String(pmOutHour).padStart(2, "0")}:${String(pmOutMin).padStart(2, "0")}`;
+          }
+
+          if (amInStr && amOutStr) {
+            const amId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
             await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
-              visId, employeeId, dateStr, `${dateStr}T${inStr}:00`, `${dateStr}T${outStr}:00`, `Simulated: ${sch.subject || "Class"}`
+              amId, employeeId, dateStr, `${dateStr}T${amInStr}:00`, `${dateStr}T${amOutStr}:00`, "Automated AM punch"
+            );
+            count++;
+          }
+
+          if (pmInStr && pmOutStr) {
+            const pmId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+              pmId, employeeId, dateStr, `${dateStr}T${pmInStr}:00`, `${dateStr}T${pmOutStr}:00`, "Automated PM punch"
             );
             count++;
           }
         }
-      } else {
-        const schedAm = daySchedules.find(s => get24HourTimeStr(s.startTime) < "12:00");
-        const schedPm = daySchedules.find(s => get24HourTimeStr(s.startTime) >= "12:00");
-
-        let amStartStr = "08:00";
-        let amEndStr = "11:00";
-        let pmStartStr = "13:00";
-        let pmEndStr = "17:00";
-
-        if (schedAm) {
-          amStartStr = schedAm.startTime;
-          amEndStr = schedAm.endTime;
-        } else if (daySchedules.length > 0) {
-          amStartStr = "00:00";
-          amEndStr = "00:00";
-        }
-
-        if (schedPm) {
-          pmStartStr = schedPm.startTime;
-          pmEndStr = schedPm.endTime;
-        } else if (daySchedules.length > 0) {
-          pmStartStr = "00:00";
-          pmEndStr = "00:00";
-        }
-
-        let amInStr = "";
-        let amOutStr = "";
-        if (amStartStr !== "00:00" && amEndStr !== "00:00") {
-          const { hour: ash, minute: asm } = parseTo24Hour(amStartStr);
-          const amInOffset = Math.floor(Math.random() * 15) - 10;
-          let amInMin = asm + amInOffset;
-          let amInHour = ash;
-          if (amInMin < 0) { amInMin = 60 + amInMin; amInHour -= 1; }
-          amInStr = `${String(amInHour).padStart(2, "0")}:${String(amInMin).padStart(2, "0")}`;
-
-          const { hour: aeh, minute: aem } = parseTo24Hour(amEndStr);
-          const amOutOffset = Math.floor(Math.random() * 6);
-          let amOutMin = aem + amOutOffset;
-          let amOutHour = aeh;
-          amOutStr = `${String(amOutHour).padStart(2, "0")}:${String(amOutMin).padStart(2, "0")}`;
-        }
-
-        let pmInStr = "";
-        let pmOutStr = "";
-        if (pmStartStr !== "00:00" && pmEndStr !== "00:00") {
-          const { hour: psh, minute: psm } = parseTo24Hour(pmStartStr);
-          const pmInOffset = Math.floor(Math.random() * 12) - 5;
-          let pmInMin = psm + pmInOffset;
-          let pmInHour = psh;
-          if (pmInMin < 0) { pmInMin = 60 + pmInMin; pmInHour -= 1; }
-          pmInStr = `${String(pmInHour).padStart(2, "0")}:${String(pmInMin).padStart(2, "0")}`;
-
-          const { hour: peh, minute: pem } = parseTo24Hour(pmEndStr);
-          const isUndertime = Math.random() < 0.08;
-          const pmOutOffset = isUndertime ? -30 : Math.floor(Math.random() * 12);
-          let pmOutMin = pem + pmOutOffset;
-          let pmOutHour = peh;
-          if (pmOutMin < 0) { pmOutMin = 60 + pmOutMin; pmOutHour -= 1; }
-          pmOutStr = `${String(pmOutHour).padStart(2, "0")}:${String(pmOutMin).padStart(2, "0")}`;
-        }
-
-        if (amInStr && amOutStr) {
-          const amId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
-            amId, employeeId, dateStr, `${dateStr}T${amInStr}:00`, `${dateStr}T${amOutStr}:00`, "Automated AM punch"
-          );
-          count++;
-        }
-
-        if (pmInStr && pmOutStr) {
-          const pmId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
-          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
-            pmId, employeeId, dateStr, `${dateStr}T${pmInStr}:00`, `${dateStr}T${pmOutStr}:00`, "Automated PM punch"
-          );
-          count++;
-        }
       }
+    });
+
+    try {
+      await runSimulationTx();
+      await autoRecalculatePayrollForEmployee(employeeId);
+      res.json({ success: true, count });
+    } catch (error: any) {
+      console.error("Simulation Error:", error);
+      res.status(500).json({ error: error.message });
     }
-
-    await autoRecalculatePayrollForEmployee(employeeId);
-
-    res.json({ success: true, count });
   }));
 
   app.delete("/api/dtr/:id", asyncHandler(async (req: any, res: any) => {

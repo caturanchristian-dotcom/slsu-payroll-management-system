@@ -202,6 +202,7 @@ const DTR = () => {
   const [loading, setLoading] = useState(true);
   const [simulating, setSimulating] = useState(false);
 
+
   // Manual General Entry Dialog
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [newEntry, setNewEntry] = useState({
@@ -228,7 +229,7 @@ const DTR = () => {
   const [testDay, setTestDay] = useState<number>(new Date().getDate());
   const [testPreset, setTestPreset] = useState<string>('regular');
   const [testAmIn, setTestAmIn] = useState<string>('08:00');
-  const [testAmOut, setTestAmOut] = useState<string>('11:00');
+  const [testAmOut, setTestAmOut] = useState<string>('12:00');
   const [testPmIn, setTestPmIn] = useState<string>('13:00');
   const [testPmOut, setTestPmOut] = useState<string>('17:00');
   
@@ -241,17 +242,17 @@ const DTR = () => {
     setTestPreset(preset);
     if (preset === 'regular') {
       setTestAmIn('08:00');
-      setTestAmOut('11:00');
+      setTestAmOut('12:00');
       setTestPmIn('13:00');
       setTestPmOut('17:00');
     } else if (preset === 'visiting_example') {
       setTestAmIn('08:00');
-      setTestAmOut('11:00');
+      setTestAmOut('12:00');
       setTestPmIn('');
       setTestPmOut('');
     } else if (preset === 'tardy') {
       setTestAmIn('08:15');
-      setTestAmOut('11:00');
+      setTestAmOut('12:00');
       setTestPmIn('13:00');
       setTestPmOut('16:30');
     }
@@ -266,42 +267,22 @@ const DTR = () => {
     try {
       const targetDate = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(testDay).padStart(2, '0')}`;
       
-      // Delete existing logs on this day for the selected employee to prevent conflict
-      const dayLogsToDelete = logs.filter(
-        l => l.employeeId === selectedEmployeeId && l.date.split('T')[0] === targetDate
-      );
-      for (const log of dayLogsToDelete) {
-        await fetch(`/api/dtr/${log.id}`, { method: 'DELETE' });
-      }
+      const response = await fetch('/api/dtr/save-day', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          date: targetDate,
+          amIn: testAmIn || null,
+          amOut: testAmOut || null,
+          pmIn: testPmIn || null,
+          pmOut: testPmOut || null,
+          notes: testPreset === 'visiting_example' ? 'Visiting Instructor Session' : 'Sandbox AM/PM Work'
+        })
+      });
 
-      // Add AM if set
-      if (testAmIn) {
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: targetDate,
-            timeIn: testAmIn,
-            timeOut: testAmOut || null,
-            notes: testPreset === 'visiting_example' ? 'Visiting Instructor Session' : 'Sandbox AM Work'
-          })
-        });
-      }
-
-      // Add PM if set
-      if (testPmIn) {
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: targetDate,
-            timeIn: testPmIn,
-            timeOut: testPmOut || null,
-            notes: 'Sandbox PM Work'
-          })
-        });
+      if (!response.ok) {
+        throw new Error('Failed to configure day');
       }
 
       toast.success(`Day ${testDay} configured and simulated!`);
@@ -339,39 +320,22 @@ const DTR = () => {
       if (singlePunchType === 'pmin') updatedPmIn = singlePunchTime;
       if (singlePunchType === 'pmout') updatedPmOut = singlePunchTime;
 
-      // Delete existing to clean-slate build is sessions
-      for (const log of dayLogs) {
-        await fetch(`/api/dtr/${log.id}`, { method: 'DELETE' });
-      }
+      const response = await fetch('/api/dtr/save-day', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          date: targetDate,
+          amIn: updatedAmIn || null,
+          amOut: updatedAmOut || null,
+          pmIn: updatedPmIn || null,
+          pmOut: updatedPmOut || null,
+          notes: 'Mock Single Punch'
+        })
+      });
 
-      // Re-save AM session
-      if (updatedAmIn || updatedAmOut) {
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: targetDate,
-            timeIn: updatedAmIn || '08:00',
-            timeOut: updatedAmOut || null,
-            notes: 'Mock Single Punch AM'
-          })
-        });
-      }
-
-      // Re-save PM session
-      if (updatedPmIn || updatedPmOut) {
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: targetDate,
-            timeIn: updatedPmIn || '13:00',
-            timeOut: updatedPmOut || null,
-            notes: 'Mock Single Punch PM'
-          })
-        });
+      if (!response.ok) {
+        throw new Error('Failed to register mock punch');
       }
 
       toast.success(`Punch registered on day ${singlePunchDay} at ${singlePunchTime}!`);
@@ -394,12 +358,23 @@ const DTR = () => {
     setIsSandboxOperating(true);
     try {
       const targetDate = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-      const dayLogs = logs.filter(
-        l => l.employeeId === selectedEmployeeId && l.date.split('T')[0] === targetDate
-      );
-      for (const log of dayLogs) {
-        await fetch(`/api/dtr/${log.id}`, { method: 'DELETE' });
+      const response = await fetch('/api/dtr/save-day', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          date: targetDate,
+          amIn: null,
+          amOut: null,
+          pmIn: null,
+          pmOut: null
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to clear day logs');
       }
+
       toast.success(`Cleared all punch transactions for day ${dayNum}.`);
       fetchLogs();
     } catch (err) {
@@ -443,7 +418,7 @@ const DTR = () => {
 
   const getEmployeeScheduleText = () => {
     if (employeeSchedules.length === 0) {
-      return '8:00 AM - 11:00 AM, 1:00 PM - 5:00 PM';
+      return '8:00 AM - 12:00 PM, 1:00 PM - 5:00 PM';
     }
     const activeSchedules = employeeSchedules.filter(s => !s.specificDate);
     const times: string[] = [];
@@ -470,7 +445,7 @@ const DTR = () => {
     if (times.length > 0) {
       return times.join(', ');
     }
-    return '8:00 AM - 11:00 AM, 1:00 PM - 5:00 PM';
+    return '8:00 AM - 12:00 PM, 1:00 PM - 5:00 PM';
   };
 
   const fetchLogs = async () => {
@@ -633,39 +608,22 @@ const DTR = () => {
 
   const handleSaveDayPunches = async () => {
     try {
-      // First delete all existing logs for this employee on this specific day to avoid conflicts
-      for (const log of editingDayLogs) {
-        await fetch(`/api/dtr/${log.id}`, { method: 'DELETE' });
-      }
+      const response = await fetch('/api/dtr/save-day', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          date: editDate,
+          amIn: editPunches.amIn || null,
+          amOut: editPunches.amOut || null,
+          pmIn: editPunches.pmIn || null,
+          pmOut: editPunches.pmOut || null,
+          notes: editPunches.notes || ''
+        })
+      });
 
-      // Save AM session (if punch in is entered)
-      if (editPunches.amIn) {
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: editDate,
-            timeIn: editPunches.amIn,
-            timeOut: editPunches.amOut || null,
-            notes: editPunches.notes || 'AM Session'
-          })
-        });
-      }
-
-      // Save PM session (if punch in is entered)
-      if (editPunches.pmIn) {
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: editDate,
-            timeIn: editPunches.pmIn,
-            timeOut: editPunches.pmOut || null,
-            notes: editPunches.notes || 'PM Session'
-          })
-        });
+      if (!response.ok) {
+        throw new Error('Failed to update day punches');
       }
 
       toast.success('Timesheet day punches updated successfully.');
@@ -1038,7 +996,7 @@ const DTR = () => {
 
     // Resolve targeted schedule boundaries for regular employee
     let amStartTimeStr = '08:00';
-    let amEndTimeStr = '11:00';
+    let amEndTimeStr = '12:00';
     let pmStartTimeStr = '13:00';
     let pmEndTimeStr = '17:00';
     let hasMatchingScheduleForDay = false;
@@ -1168,7 +1126,7 @@ const DTR = () => {
 
     if (dayLogs.length > 0) {
       const amStart = amStartTimeStr !== '00:00' ? amStartMinutes : 480; // 8:00
-      const amEnd = amEndTimeStr !== '00:00' ? amEndMinutes : 660; // 11:00
+      const amEnd = amEndTimeStr !== '00:00' ? amEndMinutes : 720; // 12:00
       const pmStart = pmStartTimeStr !== '00:00' ? pmStartMinutes : 780; // 13:00
       const pmEnd = pmEndTimeStr !== '00:00' ? pmEndMinutes : 1020; // 17:00
 
@@ -1199,7 +1157,7 @@ const DTR = () => {
         const arrivalMin = amInDate.getHours() * 60 + amInDate.getMinutes();
         const departureMin = pmOutDate.getHours() * 60 + pmOutDate.getMinutes();
         let totalSpan = departureMin - arrivalMin;
-        let worked = totalSpan - 120; // Break deduction (11:00 AM - 1:00 PM is 2 hours)
+        let worked = totalSpan - 60; // Break deduction (12:00 PM - 1:00 PM is 1 hour)
         if (!isWeekendDay(dayNum)) {
           const activeSchedDuration = (amEnd - amStart) + (pmEnd - pmStart);
           worked = Math.min(worked, activeSchedDuration);
@@ -1302,6 +1260,10 @@ const DTR = () => {
     const limit = Math.min(endDay, daysInMonth);
     
     for (let day = startDay; day <= limit; day++) {
+      const dateObj = new Date(selectedYear, selectedMonth - 1, day);
+      const dayOfWeek = dateObj.getDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) continue; // Skip Saturday and Sunday
+      
       const dateStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       total += getScheduledHoursForDate(dateStr);
     }
@@ -1451,26 +1413,14 @@ const DTR = () => {
     return (
       <div key={copyIndex} className="dtr-sheet-card w-full max-w-[580px] bg-white p-6 sm:p-8 border-2 border-black rounded-none text-neutral-900 shadow-md print:shadow-none flex flex-col justify-between print-border-thick print:p-6 print:w-full print:max-w-none print:h-full">
         <div>
-          {/* Header with Two Logos */}
-          <div className="flex items-center justify-between pb-2 border-b-2 border-black gap-3">
-            <img 
-              src="/api/slsu-logo.png" 
-              alt="SLSU Logo" 
-              referrerPolicy="no-referrer"
-              className="w-12 h-12 object-contain shrink-0" 
-            />
-            <div className="flex-1 text-center leading-normal font-sans text-neutral-850">
+          {/* Header text section (logos removed) */}
+          <div className="flex items-center justify-center pb-2 border-b-2 border-black">
+            <div className="text-center leading-normal font-sans text-neutral-850">
               <p className="text-[9.5px] font-medium tracking-tight text-neutral-600">Republic of the Philippines</p>
               <p className="text-[11.5px] font-extrabold uppercase leading-none mt-0.5 text-neutral-950">SOUTHERN LEYTE STATE UNIVERSITY</p>
               <p className="text-[10px] font-extrabold mt-1 text-[#1d58d9] uppercase tracking-wide">HINUNANGAN CAMPUS</p>
               <p className="text-[9.5px] font-medium mt-0.5 text-neutral-500 font-serif italic">Hinunangan, Southern Leyte</p>
             </div>
-            <img 
-              src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Commission_on_Higher_Education_%28CHED%29_Philippines.svg/150px-Commission_on_Higher_Education_%28CHED%29_Philippines.svg.png" 
-              alt="CHED Logo" 
-              referrerPolicy="no-referrer"
-              className="w-12 h-12 object-contain shrink-0" 
-            />
           </div>
 
           {/* CS Form Layout */}
@@ -1630,7 +1580,7 @@ const DTR = () => {
   return (
     <div className="space-y-6 pb-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
       
-      {/* Dynamic Native CSS Print Styles mapping side-by-side CSC layouts on A4 paper */}
+      {/* Dynamic Native CSS Print Styles mapping CSC layouts on A4 paper */}
       <style>{`
         @media print {
           @page {
@@ -1640,11 +1590,13 @@ const DTR = () => {
           body {
             background-color: #ffffff !important;
             color: #000000 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
           #printable-dtr {
-            position: absolute;
-            left: 0;
-            top: 0;
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
             width: 100% !important;
             padding: 0 !important;
             margin: 0 !important;
@@ -1657,7 +1609,7 @@ const DTR = () => {
             background: white !important;
           }
           .dtr-sheet-card {
-            border: 1px solid #000000 !important;
+            border: 1.5px solid #000000 !important;
             background-color: #ffffff !important;
             border-radius: 0px !important;
             box-shadow: none !important;
@@ -1674,7 +1626,7 @@ const DTR = () => {
             display: none !important;
           }
           .print-border-thick {
-            border: 1px solid #000000 !important;
+            border: 1.5px solid #000000 !important;
           }
           .print-cell-border {
             border: 0.5px solid #000000 !important;
@@ -2103,9 +2055,37 @@ const DTR = () => {
         </Card>
       </div>
 
+      {/* Civil Service Commission Form No. 48 Print Setup Controls */}
+      <Card className="no-print border border-neutral-200 shadow-md rounded-2xl p-5 bg-white space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-green-50 text-green-700 rounded-xl">
+              <Printer className="w-5 h-5 text-green-700" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-sm text-neutral-800 leading-tight">Print Setup & Wording</h3>
+              <p className="text-neutral-500 text-[11px] mt-0.5 font-medium">Configure Form 48 print layout and guidelines.</p>
+            </div>
+          </div>
+          <Button 
+            onClick={triggerPrint}
+            className="bg-green-700 hover:bg-green-800 text-white gap-2 rounded-xl font-sans text-xs h-10 px-4 shadow-sm"
+          >
+            <Printer className="w-4 h-4" />
+            Trigger Print Dialog
+          </Button>
+        </div>
+        
+        <div className="p-3 bg-neutral-50/80 border border-neutral-100 rounded-xl text-[10.5px] text-neutral-500 font-medium">
+          💡 <span className="font-bold text-neutral-600">Pro-Tip:</span> For a perfect layout, set the print margins in your browser print dialog to <span className="font-bold text-neutral-700">None</span> or <span className="font-bold text-neutral-700">Default</span>, and ensure <span className="font-bold text-neutral-700">"Background graphics"</span> is checked.
+        </div>
+      </Card>
+
       {/* CIVIL SERVICE FORM 48 PRINT LAYOUT SHEET CONTAINER */}
-      <div id="printable-dtr" className="bg-neutral-100/50 border border-neutral-200/50 p-4 lg:p-8 rounded-3xl shadow-inner bg-white flex flex-col items-center justify-center animate-in fade-in">
-        {renderDtrSheet(1)}
+      <div id="printable-dtr" className="bg-neutral-100/50 border border-neutral-200/50 p-4 lg:p-8 rounded-3xl shadow-inner bg-white flex flex-col items-center justify-center animate-in fade-in overflow-x-auto">
+        <div className="flex flex-col gap-6 items-center w-full">
+          {renderDtrSheet(1)}
+        </div>
       </div>
 
       {/* MODAL 1: Row Click AM/PM Punch Editor */}
@@ -2263,12 +2243,12 @@ const DTR = () => {
                             className="text-[9px] h-6 px-2 border-emerald-200 text-emerald-700 bg-white hover:bg-emerald-100 rounded-md font-medium"
                             onClick={() => setInlineSchedule({
                               startTime: '08:00',
-                              endTime: '11:00',
+                              endTime: '12:00',
                               subject: 'Core Hours',
                               room: 'Office'
                             })}
                           >
-                            Morning (08:00-11:00 AM)
+                            Morning (08:00-12:00 PM)
                           </Button>
                           <Button
                             type="button"
@@ -2513,10 +2493,10 @@ const DTR = () => {
                         onClick={() => setNewEntry(prev => ({
                           ...prev,
                           timeIn: '08:00',
-                          timeOut: '11:00'
+                          timeOut: '12:00'
                         }))}
                       >
-                        Morning (8-11 AM)
+                        Morning (8-12 PM)
                       </Button>
                       <Button
                         type="button"
