@@ -658,63 +658,25 @@ const DTRJobOrder = () => {
     }
     setSimulating(true);
     try {
-      const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
-      let count = 0;
-      
-      const yearMonthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
-      await fetch(`/api/dtr/clear/${selectedEmployeeId}/${yearMonthStr}`, { method: 'DELETE' });
+      const response = await fetch('/api/dtr/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          year: selectedYear,
+          month: selectedMonth
+        })
+      });
 
-      for (let day = 1; day <= daysInMonth; day++) {
-        const dateStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const dateObj = new Date(selectedYear, selectedMonth - 1, day);
-        const dayOfWeek = dateObj.getDay();
-
-        if (dayOfWeek === 0 || dayOfWeek === 6) continue; // Skip weekends
-
-        const inHour = 8;
-        const inMin = Math.floor(Math.random() * 10); // 08:00 to 08:09
-        const outHour = 11;
-        const outMin = Math.floor(Math.random() * 5); // 11:00 to 11:04
-
-        const pmInHour = 13;
-        const pmInMin = Math.floor(Math.random() * 10); // 13:00 to 13:09
-        const pmOutHour = 17;
-        const pmOutMin = Math.floor(Math.random() * 10); // 17:00 to 17:09
-
-        const amInStr = `${String(inHour).padStart(2, '0')}:${String(inMin).padStart(2, '0')}`;
-        const amOutStr = `${String(outHour).padStart(2, '0')}:${String(outMin).padStart(2, '0')}`;
-        const pmInStr = `${String(pmInHour).padStart(2, '0')}:${String(pmInMin).padStart(2, '0')}`;
-        const pmOutStr = `${String(pmOutHour).padStart(2, '0')}:${String(pmOutMin).padStart(2, '0')}`;
-
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: dateStr,
-            timeIn: amInStr,
-            timeOut: amOutStr,
-            notes: 'AM shift'
-          })
-        });
-
-        await fetch('/api/dtr/manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: selectedEmployeeId,
-            date: dateStr,
-            timeIn: pmInStr,
-            timeOut: pmOutStr,
-            notes: 'PM shift'
-          })
-        });
-        count += 2;
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Simulation failed');
       }
-      toast.success(`Successfully simulated ${count} timesheet log entries for this Job Order employee's account.`);
+
+      toast.success(`Successfully simulated ${data.count || 0} timesheet records.`);
       fetchLogs();
-    } catch (err) {
-      toast.error('Simulation failed');
+    } catch (err: any) {
+      toast.error(err.message || 'Simulation failed');
     } finally {
       setSimulating(false);
     }

@@ -1477,8 +1477,8 @@ const Employees = () => {
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (file) {
-                          if (file.size > 2 * 1024 * 1024) {
-                            toast.error("Image file is too large! Maximum limit is 2MB.");
+                          if (file.size > 20 * 1024 * 1024) {
+                            toast.error("Image file is too large! Maximum limit is 20MB.");
                             return;
                           }
                           const reader = new FileReader();
@@ -1492,7 +1492,7 @@ const Employees = () => {
                         }
                       }}
                     />
-                    <p className="text-[10px] text-neutral-400">Supported formats: JPG, PNG. Max size: 2MB.</p>
+                    <p className="text-[10px] text-neutral-400">Supported formats: JPG, PNG. Max size: 20MB.</p>
                   </div>
                 </div>
 

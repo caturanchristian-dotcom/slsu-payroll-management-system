@@ -299,7 +299,11 @@ async function initDb() {
           if (isMysql) {
             // Translate TEXT to VARCHAR(255) when there's a default value for MySQL support
             mysqlDef = mysqlDef.replace(/\bTEXT\s+DEFAULT\b/gi, "VARCHAR(255) DEFAULT");
-            mysqlDef = mysqlDef.replace(/\bTEXT\b/gi, "VARCHAR(255)");
+            if (col === "profileImage" || col === "custom_values_json") {
+              mysqlDef = mysqlDef.replace(/\bTEXT\b/gi, "LONGTEXT");
+            } else {
+              mysqlDef = mysqlDef.replace(/\bTEXT\b/gi, "VARCHAR(255)");
+            }
             mysqlDef = mysqlDef.replace(/\bINTEGER\s+DEFAULT\b/gi, "INT DEFAULT");
             mysqlDef = mysqlDef.replace(/\bINTEGER\b/gi, "INT");
           }
@@ -326,6 +330,22 @@ async function initDb() {
     }
     await ensureColumn("employees", "gender", "TEXT DEFAULT 'MALE'");
     await ensureColumn("employees", "profileImage", "TEXT");
+    await ensureColumn("users", "profileImage", "TEXT");
+
+    if (isMysql) {
+      try {
+        await db.exec("ALTER TABLE employees MODIFY COLUMN profileImage LONGTEXT");
+        console.log("[Migration] Successfully modified employees.profileImage to LONGTEXT");
+      } catch (err: any) {
+        console.warn("[Migration] Could not modify employees.profileImage to LONGTEXT:", err.message);
+      }
+      try {
+        await db.exec("ALTER TABLE users MODIFY COLUMN profileImage LONGTEXT");
+        console.log("[Migration] Successfully modified users.profileImage to LONGTEXT");
+      } catch (err: any) {
+        console.warn("[Migration] Could not modify users.profileImage to LONGTEXT:", err.message);
+      }
+    }
 
     // Backfill employee gender if they are not updated or blank
     try {
@@ -772,7 +792,8 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // Global Error Handler Middleware
   const asyncHandler = (fn: Function) => (req: any, res: any, next: any) => {
@@ -1586,8 +1607,8 @@ async function startServer() {
       const employee = await db.prepare("SELECT * FROM employees WHERE LOWER(email) = ?").get(cleanEmail) as any;
       if (employee) {
         const id = employee.id;
-        await db.prepare("INSERT OR REPLACE INTO users (id, email, password, displayName, role) VALUES (?, ?, ?, ?, ?)").run(
-          id, employee.email, employee.password, `${employee.firstName} ${employee.lastName}`, 'employee'
+        await db.prepare("INSERT OR REPLACE INTO users (id, email, password, displayName, role, profileImage) VALUES (?, ?, ?, ?, ?, ?)").run(
+          id, employee.email, employee.password, `${employee.firstName} ${employee.lastName}`, 'employee', employee.profileImage || ''
         );
         user = await db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
       }
@@ -1649,8 +1670,8 @@ async function startServer() {
           id, finalEmployeeId, firstName, lastName, email, password, category, basicSalary, salaryType || 'monthly', phoneNumber || '09171234567', keySss, keyPh, keyPi,
           bpno || '', mi || '', prefix || '', appellation || '', birthDate || '', crn || '', effectivityDate || '', position || '', finalGender, profileImage || '', employeeNo || ''
         );
-        await db.prepare("INSERT OR REPLACE INTO users (id, email, password, displayName, role) VALUES (?, ?, ?, ?, ?)").run(
-          id, email, password, `${firstName} ${lastName}`, 'employee'
+        await db.prepare("INSERT OR REPLACE INTO users (id, email, password, displayName, role, profileImage) VALUES (?, ?, ?, ?, ?, ?)").run(
+          id, email, password, `${firstName} ${lastName}`, 'employee', profileImage || ''
         );
       })();
       res.json({ id, ...req.body, employeeId: finalEmployeeId });
@@ -1776,8 +1797,8 @@ async function startServer() {
         empParams.push(req.params.id);
         await db.prepare(empQuery).run(...empParams);
 
-        let userQuery = "UPDATE users SET email = ?, displayName = ?";
-        let userParams: any[] = [email, `${firstName} ${lastName}`];
+        let userQuery = "UPDATE users SET email = ?, displayName = ?, profileImage = ?";
+        let userParams: any[] = [email, `${firstName} ${lastName}`, profileImage || ''];
         if (password?.trim()) {
           userQuery += ", password = ?";
           userParams.push(password);
@@ -2413,6 +2434,203 @@ async function startServer() {
     }
   }));
 
+  app.post("/api/dtr/simulate", asyncHandler(async (req: any, res: any) => {
+    const { employeeId, year, month } = req.body;
+    if (!employeeId || !year || !month) {
+      return res.status(400).json({ error: "employeeId, year, and month are required" });
+    }
+
+    const employee = await db.prepare("SELECT * FROM employees WHERE id = ?").get(employeeId) as any;
+    if (!employee) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
+    const category = employee.category || "Regular Employee";
+    const yearMonthStr = `${year}-${String(month).padStart(2, "0")}`;
+
+    await db.prepare("DELETE FROM dtr_logs WHERE employeeId = ? AND date LIKE ?").run(employeeId, `${yearMonthStr}%`);
+
+    const schedules = await db.prepare("SELECT * FROM schedules WHERE employeeId = ?").all(employeeId) as any[];
+
+    const parseTo24Hour = (timeStr: string) => {
+      if (!timeStr) return { hour: 0, minute: 0 };
+      let [h, m] = timeStr.split(":").map(Number);
+      if (h > 0 && h <= 6) h += 12;
+      return { hour: h, minute: m || 0 };
+    };
+
+    const get24HourTimeStr = (tStr: string) => {
+      if (!tStr) return "";
+      let [h, m] = tStr.split(":").map(Number);
+      if (h > 0 && h <= 6) h += 12;
+      const mm = m || 0;
+      return `${h < 10 ? "0" + h : h}:${mm < 10 ? "0" + mm : mm}`;
+    };
+
+    const daysInMonth = new Date(Number(year), Number(month), 0).getDate();
+    let count = 0;
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      const dateObj = new Date(Number(year), Number(month) - 1, day);
+      const dayOfWeek = dateObj.getDay();
+
+      if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+
+      const daysOfWeekStr = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const dayName = daysOfWeekStr[dayOfWeek];
+
+      const daySchedules = schedules.filter((sch: any) => {
+        const dateVal = dateStr;
+        if (sch.effectiveFrom && dateVal < sch.effectiveFrom.split("T")[0]) return false;
+        if (sch.effectiveTo && dateVal > sch.effectiveTo.split("T")[0]) return false;
+
+        if (sch.specificDate) {
+          const sDate = sch.specificDate.split("T")[0];
+          return sDate === dateStr;
+        }
+        return sch.dayOfWeek === dayName;
+      });
+
+      if (category === "Job Order") {
+        const inHour = 8;
+        const inMin = Math.floor(Math.random() * 10);
+        const outHour = 11;
+        const outMin = Math.floor(Math.random() * 5);
+
+        const pmInHour = 13;
+        const pmInMin = Math.floor(Math.random() * 10);
+        const pmOutHour = 17;
+        const pmOutMin = Math.floor(Math.random() * 10);
+
+        const amInStr = `${String(inHour).padStart(2, "0")}:${String(inMin).padStart(2, "0")}`;
+        const amOutStr = `${String(outHour).padStart(2, "0")}:${String(outMin).padStart(2, "0")}`;
+        const pmInStr = `${String(pmInHour).padStart(2, "0")}:${String(pmInMin).padStart(2, "0")}`;
+        const pmOutStr = `${String(pmOutHour).padStart(2, "0")}:${String(pmOutMin).padStart(2, "0")}`;
+
+        const amId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+        await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+          amId, employeeId, dateStr, `${dateStr}T${amInStr}:00`, `${dateStr}T${amOutStr}:00`, "AM shift"
+        );
+
+        const pmId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+        await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+          pmId, employeeId, dateStr, `${dateStr}T${pmInStr}:00`, `${dateStr}T${pmOutStr}:00`, "PM shift"
+        );
+        count += 2;
+      } else if (category === "Visiting Instructor") {
+        if (daySchedules.length === 0) continue;
+
+        for (const sch of daySchedules) {
+          if (sch.startTime && sch.endTime) {
+            let [sh, sm] = sch.startTime.split(":").map(Number);
+            let [eh, em] = sch.endTime.split(":").map(Number);
+
+            const arrivalOffset = Math.floor(Math.random() * 6) - 3;
+            let minutesIn = sm + arrivalOffset;
+            let hourIn = sh;
+            if (minutesIn < 0) { minutesIn = 60 + minutesIn; hourIn -= 1; }
+            if (minutesIn >= 60) { minutesIn = minutesIn - 60; hourIn += 1; }
+
+            const departureOffset = Math.floor(Math.random() * 5);
+            let minutesOut = em + departureOffset;
+            let hourOut = eh;
+            if (minutesOut >= 60) { minutesOut = minutesOut - 60; hourOut += 1; }
+
+            const inStr = `${String(hourIn).padStart(2, "0")}:${String(minutesIn).padStart(2, "0")}`;
+            const outStr = `${String(hourOut).padStart(2, "0")}:${String(minutesOut).padStart(2, "0")}`;
+
+            const visId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+              visId, employeeId, dateStr, `${dateStr}T${inStr}:00`, `${dateStr}T${outStr}:00`, `Simulated: ${sch.subject || "Class"}`
+            );
+            count++;
+          }
+        }
+      } else {
+        const schedAm = daySchedules.find(s => get24HourTimeStr(s.startTime) < "12:00");
+        const schedPm = daySchedules.find(s => get24HourTimeStr(s.startTime) >= "12:00");
+
+        let amStartStr = "08:00";
+        let amEndStr = "11:00";
+        let pmStartStr = "13:00";
+        let pmEndStr = "17:00";
+
+        if (schedAm) {
+          amStartStr = schedAm.startTime;
+          amEndStr = schedAm.endTime;
+        } else if (daySchedules.length > 0) {
+          amStartStr = "00:00";
+          amEndStr = "00:00";
+        }
+
+        if (schedPm) {
+          pmStartStr = schedPm.startTime;
+          pmEndStr = schedPm.endTime;
+        } else if (daySchedules.length > 0) {
+          pmStartStr = "00:00";
+          pmEndStr = "00:00";
+        }
+
+        let amInStr = "";
+        let amOutStr = "";
+        if (amStartStr !== "00:00" && amEndStr !== "00:00") {
+          const { hour: ash, minute: asm } = parseTo24Hour(amStartStr);
+          const amInOffset = Math.floor(Math.random() * 15) - 10;
+          let amInMin = asm + amInOffset;
+          let amInHour = ash;
+          if (amInMin < 0) { amInMin = 60 + amInMin; amInHour -= 1; }
+          amInStr = `${String(amInHour).padStart(2, "0")}:${String(amInMin).padStart(2, "0")}`;
+
+          const { hour: aeh, minute: aem } = parseTo24Hour(amEndStr);
+          const amOutOffset = Math.floor(Math.random() * 6);
+          let amOutMin = aem + amOutOffset;
+          let amOutHour = aeh;
+          amOutStr = `${String(amOutHour).padStart(2, "0")}:${String(amOutMin).padStart(2, "0")}`;
+        }
+
+        let pmInStr = "";
+        let pmOutStr = "";
+        if (pmStartStr !== "00:00" && pmEndStr !== "00:00") {
+          const { hour: psh, minute: psm } = parseTo24Hour(pmStartStr);
+          const pmInOffset = Math.floor(Math.random() * 12) - 5;
+          let pmInMin = psm + pmInOffset;
+          let pmInHour = psh;
+          if (pmInMin < 0) { pmInMin = 60 + pmInMin; pmInHour -= 1; }
+          pmInStr = `${String(pmInHour).padStart(2, "0")}:${String(pmInMin).padStart(2, "0")}`;
+
+          const { hour: peh, minute: pem } = parseTo24Hour(pmEndStr);
+          const isUndertime = Math.random() < 0.08;
+          const pmOutOffset = isUndertime ? -30 : Math.floor(Math.random() * 12);
+          let pmOutMin = pem + pmOutOffset;
+          let pmOutHour = peh;
+          if (pmOutMin < 0) { pmOutMin = 60 + pmOutMin; pmOutHour -= 1; }
+          pmOutStr = `${String(pmOutHour).padStart(2, "0")}:${String(pmOutMin).padStart(2, "0")}`;
+        }
+
+        if (amInStr && amOutStr) {
+          const amId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+            amId, employeeId, dateStr, `${dateStr}T${amInStr}:00`, `${dateStr}T${amOutStr}:00`, "Automated AM punch"
+          );
+          count++;
+        }
+
+        if (pmInStr && pmOutStr) {
+          const pmId = `dtr-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+          await db.prepare("INSERT INTO dtr_logs (id, employeeId, date, timeIn, timeOut, notes) VALUES (?, ?, ?, ?, ?, ?)").run(
+            pmId, employeeId, dateStr, `${dateStr}T${pmInStr}:00`, `${dateStr}T${pmOutStr}:00`, "Automated PM punch"
+          );
+          count++;
+        }
+      }
+    }
+
+    await autoRecalculatePayrollForEmployee(employeeId);
+
+    res.json({ success: true, count });
+  }));
+
   app.delete("/api/dtr/:id", asyncHandler(async (req: any, res: any) => {
     const log = await db.prepare("SELECT employeeId FROM dtr_logs WHERE id = ?").get(req.params.id) as any;
     if (log) {
@@ -2467,11 +2685,11 @@ async function startServer() {
 
   app.get("/api/profile", asyncHandler(async (req: any, res: any) => {
     const email = req.query.email as string;
-    const user = await db.prepare("SELECT id, email, displayName, role FROM users WHERE email = ?").get(email) as any;
+    const user = await db.prepare("SELECT id, email, displayName, role, profileImage FROM users WHERE email = ?").get(email) as any;
     if (!user) return res.status(404).json({ error: "User not found" });
     if (user.role === 'employee') {
       const emp = await db.prepare("SELECT * FROM employees WHERE email = ?").get(email) as any;
-      return res.json({ ...user, ...emp });
+      return res.json({ ...user, ...emp, profileImage: emp?.profileImage || user?.profileImage || '' });
     }
     res.json(user);
   }));
@@ -2609,6 +2827,10 @@ async function startServer() {
         
         let userQuery = "UPDATE users SET displayName = ?";
         let userParams: any[] = [displayName];
+        if (profileImage !== undefined) {
+          userQuery += ", profileImage = ?";
+          userParams.push(profileImage);
+        }
         if (password?.trim()) {
           userQuery += ", password = ?";
           userParams.push(password);

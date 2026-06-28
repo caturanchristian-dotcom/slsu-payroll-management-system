@@ -679,146 +679,25 @@ const DTRRegular = () => {
     }
     setSimulating(true);
     try {
-      const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
-      
-      const yearMonthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
-      await fetch(`/api/dtr/clear/${selectedEmployeeId}/${yearMonthStr}`, { method: 'DELETE' });
+      const response = await fetch('/api/dtr/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          year: selectedYear,
+          month: selectedMonth
+        })
+      });
 
-      const parseTo24Hour = (timeStr: string) => {
-        if (!timeStr) return { hour: 0, minute: 0 };
-        let [h, m] = timeStr.split(':').map(Number);
-        if (h > 0 && h <= 6) h += 12;
-        return { hour: h, minute: m || 0 };
-      };
-
-      const get24HourTimeStr = (tStr: string) => {
-        if (!tStr) return '';
-        let [h, m] = tStr.split(':').map(Number);
-        if (h > 0 && h <= 6) h += 12;
-        const mm = m || 0;
-        return `${h < 10 ? '0' + h : h}:${mm < 10 ? '0' + mm : mm}`;
-      };
-
-      const fetchPromises: Promise<boolean>[] = [];
-
-      for (let day = 1; day <= daysInMonth; day++) {
-        const dateStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const dateObj = new Date(selectedYear, selectedMonth - 1, day);
-        const dayOfWeek = dateObj.getDay();
-
-        if (dayOfWeek === 0 || dayOfWeek === 6) continue; // Skip weekends
-
-        const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        const dayName = daysOfWeekStr[dayOfWeek];
-
-        const daySchedules = employeeSchedules.filter((sch: any) => {
-          if (sch.specificDate) {
-            const sDate = sch.specificDate.split('T')[0];
-            return sDate === dateStr;
-          }
-          return sch.dayOfWeek === dayName;
-        });
-
-        const schedAm = daySchedules.find(s => get24HourTimeStr(s.startTime) < '12:00');
-        const schedPm = daySchedules.find(s => get24HourTimeStr(s.startTime) >= '12:00');
-
-        let amStartStr = '08:00';
-        let amEndStr = '11:00';
-        let pmStartStr = '13:00';
-        let pmEndStr = '17:00';
-
-        if (schedAm) {
-          amStartStr = schedAm.startTime;
-          amEndStr = schedAm.endTime;
-        } else if (daySchedules.length > 0) {
-          amStartStr = '00:00';
-          amEndStr = '00:00';
-        }
-
-        if (schedPm) {
-          pmStartStr = schedPm.startTime;
-          pmEndStr = schedPm.endTime;
-        } else if (daySchedules.length > 0) {
-          pmStartStr = '00:00';
-          pmEndStr = '00:00';
-        }
-
-        let amInStr = '';
-        let amOutStr = '';
-        if (amStartStr !== '00:00' && amEndStr !== '00:00') {
-          const { hour: ash, minute: asm } = parseTo24Hour(amStartStr);
-          const amInOffset = Math.floor(Math.random() * 15) - 10;
-          let amInMin = asm + amInOffset;
-          let amInHour = ash;
-          if (amInMin < 0) { amInMin = 60 + amInMin; amInHour -= 1; }
-          amInStr = `${String(amInHour).padStart(2, '0')}:${String(amInMin).padStart(2, '0')}`;
-
-          const { hour: aeh, minute: aem } = parseTo24Hour(amEndStr);
-          const amOutOffset = Math.floor(Math.random() * 6);
-          let amOutMin = aem + amOutOffset;
-          let amOutHour = aeh;
-          amOutStr = `${String(amOutHour).padStart(2, '0')}:${String(amOutMin).padStart(2, '0')}`;
-        }
-
-        let pmInStr = '';
-        let pmOutStr = '';
-        if (pmStartStr !== '00:00' && pmEndStr !== '00:00') {
-          const { hour: psh, minute: psm } = parseTo24Hour(pmStartStr);
-          const pmInOffset = Math.floor(Math.random() * 12) - 5;
-          let pmInMin = psm + pmInOffset;
-          let pmInHour = psh;
-          if (pmInMin < 0) { pmInMin = 60 + pmInMin; pmInHour -= 1; }
-          pmInStr = `${String(pmInHour).padStart(2, '0')}:${String(pmInMin).padStart(2, '0')}`;
-
-          const { hour: peh, minute: pem } = parseTo24Hour(pmEndStr);
-          const isUndertime = Math.random() < 0.08;
-          const pmOutOffset = isUndertime ? -30 : Math.floor(Math.random() * 12);
-          let pmOutMin = pem + pmOutOffset;
-          let pmOutHour = peh;
-          if (pmOutMin < 0) { pmOutMin = 60 + pmOutMin; pmOutHour -= 1; }
-          pmOutStr = `${String(pmOutHour).padStart(2, '0')}:${String(pmOutMin).padStart(2, '0')}`;
-        }
-
-        if (amInStr && amOutStr) {
-          fetchPromises.push(
-            fetch('/api/dtr/manual', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                employeeId: selectedEmployeeId,
-                date: dateStr,
-                timeIn: amInStr,
-                timeOut: amOutStr,
-                notes: 'Automated AM punch'
-              })
-            }).then(r => r.ok).catch(() => false)
-          );
-        }
-
-        if (pmInStr && pmOutStr) {
-          fetchPromises.push(
-            fetch('/api/dtr/manual', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                employeeId: selectedEmployeeId,
-                date: dateStr,
-                timeIn: pmInStr,
-                timeOut: pmOutStr,
-                notes: 'Automated PM punch'
-              })
-            }).then(r => r.ok).catch(() => false)
-          );
-        }
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Simulation failed');
       }
 
-      const results = await Promise.all(fetchPromises);
-      const successCount = results.filter(Boolean).length;
-
-      toast.success(`Successfully simulated ${successCount} timesheet records.`);
+      toast.success(`Successfully simulated ${data.count || 0} timesheet records.`);
       fetchLogs();
-    } catch (err) {
-      toast.error('Simulation failed');
+    } catch (err: any) {
+      toast.error(err.message || 'Simulation failed');
     } finally {
       setSimulating(false);
     }

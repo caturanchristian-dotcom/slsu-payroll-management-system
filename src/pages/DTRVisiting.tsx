@@ -814,75 +814,25 @@ const DTRVisiting = () => {
     }
     setSimulating(true);
     try {
-      const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
-      let count = 0;
-      
-      const yearMonthStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
-      await fetch(`/api/dtr/clear/${selectedEmployeeId}/${yearMonthStr}`, { method: 'DELETE' });
+      const response = await fetch('/api/dtr/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: selectedEmployeeId,
+          year: selectedYear,
+          month: selectedMonth
+        })
+      });
 
-      for (let day = 1; day <= daysInMonth; day++) {
-        const dateStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const dateObj = new Date(selectedYear, selectedMonth - 1, day);
-        const dayOfWeek = dateObj.getDay();
-
-        if (dayOfWeek === 0 || dayOfWeek === 6) continue; // Skip weekends
-
-        const daysOfWeekStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        const dayName = daysOfWeekStr[dayOfWeek];
-
-        const daySchedules = employeeSchedules.filter((sch: any) => {
-          const dateVal = dateStr.split('T')[0];
-          if (sch.effectiveFrom && dateVal < sch.effectiveFrom.split('T')[0]) return false;
-          if (sch.effectiveTo && dateVal > sch.effectiveTo.split('T')[0]) return false;
-
-          if (sch.specificDate) {
-            const sDate = sch.specificDate.split('T')[0];
-            return sDate === dateStr;
-          }
-          return sch.dayOfWeek === dayName;
-        });
-
-        if (daySchedules.length === 0) continue;
-
-        // Generate logs matching schedules with subtle offsets
-        for (const sch of daySchedules) {
-          if (sch.startTime && sch.endTime) {
-            let [sh, sm] = sch.startTime.split(':').map(Number);
-            let [eh, em] = sch.endTime.split(':').map(Number);
-
-            const arrivalOffset = Math.floor(Math.random() * 6) - 3; // -3 to +3 min
-            let minutesIn = sm + arrivalOffset;
-            let hourIn = sh;
-            if (minutesIn < 0) { minutesIn = 60 + minutesIn; hourIn -= 1; }
-            if (minutesIn >= 60) { minutesIn = minutesIn - 60; hourIn += 1; }
-
-            const departureOffset = Math.floor(Math.random() * 5); // 0 to +4 min
-            let minutesOut = em + departureOffset;
-            let hourOut = eh;
-            if (minutesOut >= 60) { minutesOut = minutesOut - 60; hourOut += 1; }
-
-            const inStr = `${String(hourIn).padStart(2, '0')}:${String(minutesIn).padStart(2, '0')}`;
-            const outStr = `${String(hourOut).padStart(2, '0')}:${String(minutesOut).padStart(2, '0')}`;
-
-            await fetch('/api/dtr/manual', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                employeeId: selectedEmployeeId,
-                date: dateStr,
-                timeIn: inStr,
-                timeOut: outStr,
-                notes: `Simulated: ${sch.subject}`
-              })
-            });
-            count++;
-          }
-        }
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Simulation failed');
       }
-      toast.success(`Successfully simulated ${count} files representing actual class schedules.`);
+
+      toast.success(`Successfully simulated ${data.count || 0} timesheet records.`);
       fetchLogs();
-    } catch (err) {
-      toast.error('Simulation failed');
+    } catch (err: any) {
+      toast.error(err.message || 'Simulation failed');
     } finally {
       setSimulating(false);
     }
